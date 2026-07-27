@@ -1,0 +1,330 @@
+# aibitat-harness-go
+
+`aibitat-harness-go` is a stateful agent runtime with a TUI front end. It runs an agent defined in the `./agents/chatter` folder by default, connects to an OpenAI-compatible LLM endpoint, and executes sandboxed shell/browser/filesystem tools inside a Docker runtime container.
+
+Each agent lives in its own folder under `agents/` — e.g. `agents/devops/` — containing `agent.md` (the definition), plus `skills/`, `tools/`, and a runtime `workspace/`. Point `--agent` at the folder; the harness reads `agent.md` inside it.
+
+## 1) Build on Linux
+
+This repository already keeps Go state local to the project by using a project-local `.go/` directory.
+
+### Recommended commands
+
+```bash
+./build.sh build
+```
+
+or, if you want to prepare vendor files explicitly:
+
+```bash
+./build.sh vendor
+./build.sh build
+```
+
+### What `build.sh` does
+
+- sets `GOPATH` to `./.go`
+- sets `GOMODCACHE` to `./.go/pkg/mod`
+- sets `GOCACHE` to `./.go/cache`
+- sets `GOBIN` to `./.go/bin`
+- runs `go mod tidy` / `go mod vendor`
+- builds the binary with `-mod=vendor`
+
+### Alternate manual Linux build
+
+```bash
+export GOPATH="$PWD/.go"
+export GOMODCACHE="$PWD/.go/pkg/mod"
+export GOCACHE="$PWD/.go/cache"
+export GOBIN="$PWD/.go/bin"
+mkdir -p "$GOMODCACHE" "$GOCACHE" "$GOBIN"
+
+go mod tidy
+go mod vendor
+go build -mod=vendor -o aibitat-harness-go .
+```
+
+### Clean
+
+```bash
+./build.sh clean
+```
+
+## 2) OpenRouter provider support
+
+This project uses a single OpenAI-compatible provider implementation in `internal/llm/openai_compat.go`.
+
+### How it works
+
+- `internal/config/config.go` loads `provider.base_url` and `provider.api_key_env` from the selected agent's `agent.md` (default folder: `./agents/chatter`).
+- `Config.APIKey()` reads the API key from the environment variable named in `provider.api_key_env`.
+- `main.go` creates the provider with:
+  - `llm.NewOpenAICompat(cfg.Provider.BaseURL, cfg.APIKey(), cfg.Model)`
+- `openai_compat.go` constructs an `openai-go` client with `option.WithBaseURL(baseURL)` and `option.WithAPIKey(apiKey)`.
+- The client uses `Chat.Completions.NewStreaming(...)` so the harness can stream responses and tool calls.
+
+### Using OpenRouter
+
+Use a compatible base URL and model name. For example:
+
+```yaml
+provider:
+  base_url: "https://openrouter.ai/v1"
+  api_key_env: "OPENROUTER_API_KEY"
+model: "gpt-4o-mini"
+```
+
+Then export your OpenRouter API key before running:
+
+```bash
+export OPENROUTER_API_KEY="your-openrouter-api-key"
+./build.sh run
+```
+
+### Notes
+
+- If `provider.api_key_env` is set but the env var is empty, `config.Validate()` prints a warning but still allows startup.
+- If you use a local provider that does not require auth, leave `provider.api_key_env` blank.
+- The model string should match the provider's supported chat/completion model names.
+
+## 3) Project usage
+
+### Run the harness
+
+```bash
+./build.sh run
+```
+
+This builds the binary and runs it with the `./agents/chatter` agent folder as the default.
+
+### Run an alternate agent
+
+```bash
+./aibitat-harness-go --agent ./agents/devops
+```
+
+`--agent` takes the agent folder (the harness reads `agent.md` inside it). You can override its directories per launch with `--workspace`, `--skills-dir`, `--tools-dir`, and `--sessions-dir`.
+
+### Switch agents at runtime
+
+Point `--agents` at a folder of agent folders to start in multi-agent mode:
+
+```bash
+./aibitat-harness-go --agents ./agents
+```
+
+This starts with **no agent selected** and shows the available agents. From the TUI:
+
+- `/agents` — list available agents (every subfolder containing an `agent.md`).
+- `/new <agent>` — start a session with that agent (e.g. `/new devops`). The harness tears down the current agent's sandbox and brings up the selected one.
+- `/new` — start a fresh session with the *current* agent (errors if none is selected yet).
+
+Switching agents starts a clean session; sessions are per-agent, so `/resume` only reaches the current agent's history. (`--agent <folder>` also enables `/agents`/`/new <other>` for that folder's siblings — it just selects one at startup instead of starting agent-less.)
+
+### Docker runtime
+
+The harness uses Docker to run tool execution in a sandbox container.
+
+- The runtime image is declared in the agent file under `runtime.image`.
+- The runtime image must be built ahead of time from `Dockerfile` via the
+  build script's `image` target; the harness no longer auto-builds it on
+  first run and fails fast if the image is missing locally.
+- The workspace bind mount is configured by `runtime.workspace`.
+
+Build the image on Linux/macOS:
+
+```bash
+./build.sh image
+```
+
+Or on Windows:
+
+```powershell
+.\build.ps1 image
+```
+
+The `run` target of either build script will also build the image
+automatically the first time it is invoked.
+
+## 4) Agent configuration
+
+Agents are defined in Markdown files under `agents/` as Markdown with YAML frontmatter.
+
+### Required fields
+
+```yaml
+name: "My Agent"
+model: "<model-name>"
+provider:
+  base_url: "<openai-compatible-base-url>"
+  api_key_env: "<ENV_VAR_NAME>"
+runtime:
+  image: "aibitat-harness-runtime:latest"
+  workspace: "./workspace"
+```
+
+### Optional fields
+
+- `capabilities`: list of enabled capabilities like `shell`, `browser`, `filesystem`
+- `safety.approval_required`: `true` or `false`
+- `options.supports_vision`: `true` or `false`
+- `options.max_tool_iterations`: integer
+- `options.command_timeout`: seconds
+
+### Example agent
+
+```yaml
+---
+name: "DevOps Agent"
+model: "deepseek-chat"
+provider:
+  base_url: "https://api.deepseek.com/v1"
+  api_key_env: "DEEPSEEK_API_KEY"
+runtime:
+  image: "aibitat-harness-runtime:latest"
+  workspace: "./workspace"
+capabilities:
+  - shell
+  - browser
+  - filesystem
+safety:
+  approval_required: true
+options:
+  supports_vision: false
+  max_tool_iterations: 25
+  command_timeout: 120
+---
+
+Your Markdown system prompt goes here.
+```
+
+### System prompt body
+
+Anything after the YAML frontmatter is treated as the agent's system prompt.
+
+## 5) Supported configuration fields
+
+From `internal/config/config.go`:
+
+- `name` (string)
+- `model` (string)
+- `provider.base_url` (string)
+- `provider.api_key_env` (string)
+- `runtime.image` (string)
+- `runtime.workspace` (string)
+- `capabilities` (array of strings)
+- `safety.approval_required` (bool)
+- `options.supports_vision` (bool)
+- `options.max_tool_iterations` (int)
+- `options.command_timeout` (int)
+
+## 6) Notes on the runtime container
+
+The runtime Docker image is defined in `Dockerfile` and is based on Playwright.
+It includes shell utilities, Chromium tooling, and mounts the agent workspace at `/workspace`.
+
+## 6b) Logs and crash diagnostics
+
+The TUI owns the terminal during a run, so neither stdout nor stderr is
+useful for diagnostics live. Everything goes to a per-session log file:
+
+```
+./logs/harness-<YYYYMMDD-HHMMSS>.log
+```
+
+One file per run; old files stay around until you delete them. On a fatal
+exit, the harness prints `see log: ./logs/harness-…log` to stderr so you
+know which file to open.
+
+### What lands there
+
+- **Structured beacons** for every major flow point — see the component
+  table below.
+- Anything written to `os.Stderr`. Stderr is redirected to the log file
+  before the TUI starts; on Linux/macOS this also catches Go's runtime
+  panic dump via `dup2`. On Windows the runtime caches its stderr handle
+  at startup, so runtime panic dumps from goroutines we do not own may
+  still print to the console — panics in our own goroutines are caught
+  by an explicit recover and routed through the logger first.
+- Errors from the LLM, gatekeeper, tools, and Docker.
+- Standard `log.Printf` output from third-party libraries that use the
+  stdlib logger.
+
+### Format
+
+Plain text via `log/slog`'s `TextHandler`, with the time key shortened to
+`HH:MM:SS.mmm` and the level padded to fixed width. Each event is one line:
+
+```
+t=07:44:12.103 level=INFO  msg="request sent" component=llm model=deepseek-chat msgs=3 tools=6
+t=07:44:12.480 level=INFO  msg="stream first chunk" component=llm latency_ms=377
+t=07:44:14.220 level=INFO  msg="stream done" component=llm tokens_in=412 tokens_out=88 chunks=44 elapsed_ms=2117
+t=07:44:14.221 level=INFO  msg="tool call" component=agent name=shell_exec id=call_x args_len=42
+t=07:44:14.301 level=INFO  msg="result" component=executor cmd="ls -la /workspace" out_bytes=512 elapsed_ms=77 cwd=/workspace
+```
+
+Grep / `findstr` is the intended workflow:
+
+```bash
+# every LLM round-trip
+grep '"component=llm"' logs/harness-*.log
+
+# everything from one component
+grep 'component=agent' logs/harness-*.log
+
+# only errors
+grep 'level=ERROR' logs/harness-*.log
+```
+
+### Verbosity
+
+Pass `--log-level` to set the level (default `info`):
+
+```bash
+./aibitat-harness-go --log-level debug
+```
+
+Recognised values: `debug`, `info`, `warn`, `error`. Debug adds finer-grained
+events (each `executor send`, every agent iteration counter, cwd changes).
+
+### Components / beacons
+
+| component   | what you can expect at INFO                                                              |
+| ----------- | ---------------------------------------------------------------------------------------- |
+| `logging`   | session started / ended, log file path, level, pid                                       |
+| `main`      | agent loaded (model, provider, capabilities), runtime required, TUI start/exit, signals  |
+| `config`    | api-key env warning when set but empty                                                   |
+| `docker`    | daemon reachable (api version), image verified, container started + cdp port, container stopped, orphan cleanup |
+| `executor`  | bash session started (container id, cwd, timeout), each command result (bytes, elapsed)  |
+| `browser`   | CDP connected, navigate, screenshot saved (path)                                         |
+| `llm`       | provider configured, request sent (model, msgs, tools), first chunk latency, stream done (tokens, chunks, elapsed), errors |
+| `agent`     | turn start (user msg len, history depth), tool calls dispatched, tool ok / failed, denied by operator, max iterations |
+| `gatekeeper`| approval requested, approved, denied                                                     |
+| `governor`  | per-turn usage delta + running totals                                                    |
+| `panic`     | goroutine panics — value + full stack                                                    |
+
+### What is deliberately not logged
+
+- **LLM request and response bodies.** Only metadata (token counts, message
+  counts, latencies). If you ever need to log the actual prompts, change
+  `internal/llm/openai_compat.go` — but be aware that log files contain
+  whatever you put in them.
+- **API keys.** The provider only logs whether a key is set, never its value.
+- **Full subprocess stdout.** Truncated for the log; the model still sees
+  the full output.
+
+## 7) Recommended workflow
+
+1. Build locally:
+   ```bash
+   ./build.sh build
+   ```
+2. Export the provider API key:
+   ```bash
+   export OPENROUTER_API_KEY="..."
+   ```
+3. Run the harness:
+   ```bash
+   ./build.sh run
+   ```
+4. Edit `./agents/chatter/agent.md` or `./agents/devops/agent.md` to change prompt, provider, runtime, or safety settings.

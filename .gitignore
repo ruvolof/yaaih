@@ -1,0 +1,28 @@
+# Build artifacts
+/aibitat-harness-go
+/aibitat-harness-go.exe
+/vendor/
+
+# Project-local Go caches (set via Makefile / build.ps1)
+/.go/
+
+# Workspace runtime artifacts
+/workspace/
+/screenshots/
+/agents/*/workspace/
+
+# Session transcripts (per-agent)
+/sessions/
+/agents/*/sessions/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local config that may contain secrets
+agent.local.md
+.env
+.env.local

@@ -1,0 +1,54 @@
+// TUI-bound message types emitted by the agent loop. These are pure data —
+// the TUI knows how to render each one. Keeping them here (rather than in the
+// tui package) lets the agent be unit-tested without dragging BubbleTea in.
+package agent
+
+import (
+	"github.com/ruvolof/aibitat-harness-go/internal/governor"
+)
+
+// AssistantDeltaMsg is one streamed content chunk from the model.
+type AssistantDeltaMsg struct {
+	Text string
+}
+
+// AssistantDoneMsg fires when the model has finished a turn (any tool calls
+// will have already been executed and folded back in).
+type AssistantDoneMsg struct{}
+
+// ToolCallStartMsg announces an imminent tool invocation.
+type ToolCallStartMsg struct {
+	Name string
+	Args string
+}
+
+// ToolCallResultMsg carries the (possibly truncated) result of a tool.
+type ToolCallResultMsg struct {
+	Name   string
+	Result string
+	Err    string // empty on success
+}
+
+// TimeoutMsg is rendered as a prominent warning in the TUI.
+type TimeoutMsg struct {
+	Command string
+	Message string
+}
+
+// StatsUpdateMsg refreshes the sidebar's token/cost totals: Session is the
+// current session's usage, Global is the whole run's usage.
+type StatsUpdateMsg struct {
+	Session governor.Stats
+	Global  governor.Stats
+	CWD     string
+}
+
+// ApprovalRequestMsg asks the operator to permit a restricted tool call.
+type ApprovalRequestMsg struct {
+	Request *ApprovalRequest
+}
+
+// ErrorMsg is a non-fatal error to surface in the chat view.
+type ErrorMsg struct {
+	Err string
+}

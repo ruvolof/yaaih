@@ -1,0 +1,343 @@
+// Package config parses the agent.md file: a Markdown document whose YAML
+// frontmatter describes the agent, its provider, runtime, capabilities, and
+// safety settings, and whose body is the system prompt.
+package config
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/text"
+	"go.abhg.dev/goldmark/frontmatter"
+
+	"github.com/ruvolof/aibitat-harness-go/internal/logging"
+	"github.com/ruvolof/aibitat-harness-go/internal/skills"
+)
+
+var log = logging.For("config")
+
+// Config is the fully-resolved agent configuration.
+type Config struct {
+	Name         string      `yaml:"name"`
+	Model        string      `yaml:"model"`
+	Provider     ProviderCfg `yaml:"provider"`
+	Runtime      RuntimeCfg  `yaml:"runtime"`
+	Capabilities []string    `yaml:"capabilities"`
+	Safety       Safety      `yaml:"safety"`
+	Options      Options     `yaml:"options"`
+
+	// SkillsDir holds skill markdown files; ToolsDir holds script-tool
+	// manifests + executables. Both are resolved to absolute paths during
+	// Load: a relative value (or the default) is taken relative to the
+	// agent.md directory, exactly like Runtime.Workspace. Defaults are
+	// "skills" and "tools" next to the agent.md.
+	SkillsDir string `yaml:"skills"`
+	ToolsDir  string `yaml:"tools"`
+
+	// SessionsDir holds this agent's transcript JSONL files, resolved the same
+	// way as SkillsDir/ToolsDir. Defaults to "sessions" next to the agent.md.
+	// Per-agent by default so resuming can only reach this agent's sessions.
+	SessionsDir string `yaml:"sessions"`
+
+	// EnableWorkspaceTools, when true, also loads script tools from the
+	// <workspace>/tools directory in addition to ToolsDir. This lets an agent
+	// author tools into its own workspace and pick them up with /reload before
+	// the operator promotes them to the persistent tool folder. Default false.
+	EnableWorkspaceTools bool `yaml:"enable_workspace_tools"`
+
+	// SystemPrompt is the Markdown body following the frontmatter.
+	SystemPrompt string `yaml:"-"`
+
+	// SourcePath is the absolute path to the agent.md that produced this Config.
+	SourcePath string `yaml:"-"`
+}
+
+// Overrides carries command-line values that take precedence over the
+// agent.md. An empty string means "not set" (fall back to the agent.md value,
+// then the default). Override paths are resolved relative to the current
+// working directory, since they are supplied at invocation time.
+type Overrides struct {
+	Workspace   string
+	SkillsDir   string
+	ToolsDir    string
+	SessionsDir string
+}
+
+// ProviderCfg describes the OpenAI-compatible endpoint used for all model
+// providers (DeepSeek, OpenRouter, local Ollama/LM Studio, ...).
+type ProviderCfg struct {
+	BaseURL   string `yaml:"base_url"`
+	APIKeyEnv string `yaml:"api_key_env"`
+}
+
+// RuntimeCfg describes the Docker sandbox in which shell/browser tools execute.
+type RuntimeCfg struct {
+	Image     string `yaml:"image"`
+	Workspace string `yaml:"workspace"`
+}
+
+// Safety controls human-in-the-loop gating.
+type Safety struct {
+	ApprovalRequired bool `yaml:"approval_required"`
+}
+
+// Options is the bag of behavioural knobs for the agent loop.
+type Options struct {
+	SupportsVision    bool `yaml:"supports_vision"`
+	MaxToolIterations int  `yaml:"max_tool_iterations"`
+	CommandTimeout    int  `yaml:"command_timeout"` // seconds
+}
+
+// Defaults applied after parsing if the agent.md leaves fields blank.
+const (
+	defaultRuntimeImage  = "aibitat-harness-runtime:latest"
+	defaultWorkspace     = "./workspace"
+	defaultSkillsDir     = "skills"
+	defaultToolsDir      = "tools"
+	defaultSessionsDir   = "sessions"
+	defaultMaxIterations = 25
+	defaultCmdTimeoutSec = 120
+)
+
+// Load reads, parses, and validates an agent, applying any command-line
+// overrides on top of the file's values. path is normally an agent folder
+// containing an agent.md; a direct path to an agent.md file is also accepted.
+// Skills, tools, and workspace default to subdirectories of the agent folder.
+func Load(path string, ov Overrides) (*Config, error) {
+	abs, err := resolveAgentFile(path)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, fmt.Errorf("read agent file: %w", err)
+	}
+
+	md := goldmark.New(
+		goldmark.WithExtensions(&frontmatter.Extender{}),
+	)
+	ctx := parser.NewContext()
+	doc := md.Parser().Parse(text.NewReader(raw), parser.WithContext(ctx))
+
+	fm := frontmatter.Get(ctx)
+	if fm == nil {
+		return nil, errors.New("agent.md is missing YAML frontmatter")
+	}
+
+	cfg := &Config{}
+	if err := fm.Decode(cfg); err != nil {
+		return nil, fmt.Errorf("decode frontmatter: %w", err)
+	}
+
+	// Extract the Markdown body (everything after the frontmatter block).
+	cfg.SystemPrompt = strings.TrimSpace(extractBody(raw))
+	cfg.SourcePath = abs
+	_ = doc // doc retained only to anchor ctx; goldmark API does not expose body directly
+
+	// Resolve paths: CLI overrides win over agent.md values, which win over
+	// defaults. Overrides are taken relative to CWD; agent.md values and
+	// defaults relative to the agent.md directory.
+	if err := applyOverrides(cfg, ov); err != nil {
+		return nil, err
+	}
+	applyDefaults(cfg)
+	resolveRelativePaths(cfg, filepath.Dir(abs))
+
+	// Load skills from the resolved skills directory and append them below the
+	// system prompt (after a blank line) so the agent author's voice comes
+	// first and skills read as addenda. Absence of the directory is not an
+	// error.
+	ss, err := skills.Load(cfg.SkillsDir)
+	if err != nil {
+		log.Warn("skills load partial failure", "err", err)
+	}
+	if block := skills.Format(ss); block != "" {
+		cfg.SystemPrompt = cfg.SystemPrompt + "\n\n" + block
+	}
+	log.Info("skills loaded", "count", len(ss), "dir", cfg.SkillsDir)
+
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// applyOverrides sets any path supplied on the command line, resolved to an
+// absolute path relative to the current working directory. Empty override
+// values are left untouched so the agent.md value (or default) applies.
+func applyOverrides(c *Config, ov Overrides) error {
+	for _, o := range []struct {
+		val string
+		dst *string
+	}{
+		{ov.Workspace, &c.Runtime.Workspace},
+		{ov.SkillsDir, &c.SkillsDir},
+		{ov.ToolsDir, &c.ToolsDir},
+		{ov.SessionsDir, &c.SessionsDir},
+	} {
+		if o.val == "" {
+			continue
+		}
+		abs, err := filepath.Abs(o.val)
+		if err != nil {
+			return fmt.Errorf("resolve override path %q: %w", o.val, err)
+		}
+		*o.dst = abs
+	}
+	return nil
+}
+
+// agentFileName is the fixed name of the agent definition inside an agent folder.
+const agentFileName = "agent.md"
+
+// DiscoverAgents returns the names of agent folders directly under dir — the
+// subdirectories that contain an agent.md — sorted alphabetically. A missing
+// dir returns (nil, nil); it is not an error.
+func DiscoverAgents(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read agents dir %s: %w", dir, err)
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, e.Name(), agentFileName)); err == nil {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// resolveAgentFile turns the --agent path into an absolute path to the agent.md
+// file. When path is a directory it must contain agent.md (failing otherwise);
+// when path is a file it is used directly.
+func resolveAgentFile(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve agent path: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("agent path: %w", err)
+	}
+	if info.IsDir() {
+		md := filepath.Join(abs, agentFileName)
+		if _, err := os.Stat(md); err != nil {
+			return "", fmt.Errorf("no %s in agent folder %s", agentFileName, abs)
+		}
+		return md, nil
+	}
+	return abs, nil
+}
+
+// extractBody returns the raw Markdown content after the closing `---` of the
+// YAML frontmatter. If no frontmatter delimiters are found, the whole input is
+// returned (Load's caller will already have failed on missing frontmatter).
+func extractBody(raw []byte) string {
+	open := []byte("---")
+	if !bytes.HasPrefix(raw, open) {
+		return string(raw)
+	}
+	// Skip the opening delimiter line.
+	rest := raw[len(open):]
+	// Find the closing delimiter.
+	idx := bytes.Index(rest, []byte("\n---"))
+	if idx < 0 {
+		return string(raw)
+	}
+	body := rest[idx+len("\n---"):]
+	// Drop the rest of the closing line.
+	if nl := bytes.IndexByte(body, '\n'); nl >= 0 {
+		body = body[nl+1:]
+	}
+	return string(body)
+}
+
+func applyDefaults(c *Config) {
+	if c.Runtime.Image == "" {
+		c.Runtime.Image = defaultRuntimeImage
+	}
+	if c.Runtime.Workspace == "" {
+		c.Runtime.Workspace = defaultWorkspace
+	}
+	if c.SkillsDir == "" {
+		c.SkillsDir = defaultSkillsDir
+	}
+	if c.ToolsDir == "" {
+		c.ToolsDir = defaultToolsDir
+	}
+	if c.SessionsDir == "" {
+		c.SessionsDir = defaultSessionsDir
+	}
+	if c.Options.MaxToolIterations == 0 {
+		c.Options.MaxToolIterations = defaultMaxIterations
+	}
+	if c.Options.CommandTimeout == 0 {
+		c.Options.CommandTimeout = defaultCmdTimeoutSec
+	}
+}
+
+// resolveRelativePaths turns the workspace, skills, tools, and sessions paths
+// into absolute paths relative to the agent.md's directory, so the harness can
+// be invoked from anywhere. Values already made absolute by an override are
+// left unchanged.
+func resolveRelativePaths(c *Config, agentDir string) {
+	for _, p := range []*string{&c.Runtime.Workspace, &c.SkillsDir, &c.ToolsDir, &c.SessionsDir} {
+		if !filepath.IsAbs(*p) {
+			*p = filepath.Join(agentDir, *p)
+		}
+	}
+}
+
+// APIKey reads the API key from the environment variable named by the
+// provider config. Returns "" if no env var is configured (acceptable for
+// local providers like Ollama).
+func (c *Config) APIKey() string {
+	if c.Provider.APIKeyEnv == "" {
+		return ""
+	}
+	return os.Getenv(c.Provider.APIKeyEnv)
+}
+
+// HasCapability reports whether the agent has been granted the given capability.
+func (c *Config) HasCapability(name string) bool {
+	for _, cap := range c.Capabilities {
+		if cap == name {
+			return true
+		}
+	}
+	return false
+}
+
+// Validate enforces required fields and recognised enum values.
+func (c *Config) Validate() error {
+	if strings.TrimSpace(c.Name) == "" {
+		return errors.New("agent.md: `name` is required")
+	}
+	if strings.TrimSpace(c.Model) == "" {
+		return errors.New("agent.md: `model` is required")
+	}
+	if strings.TrimSpace(c.Provider.BaseURL) == "" {
+		return errors.New("agent.md: `provider.base_url` is required")
+	}
+	if c.Provider.APIKeyEnv != "" && os.Getenv(c.Provider.APIKeyEnv) == "" {
+		// Not fatal — local providers may legitimately omit auth — but warn.
+		log.Warn("api_key_env is set but the environment variable is empty",
+			"api_key_env", c.Provider.APIKeyEnv,
+		)
+	}
+	return nil
+}
