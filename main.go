@@ -310,6 +310,7 @@ func buildAgentRuntime(ctx context.Context, agentDir, resumeID string, newSessio
 // The runtime image must be built ahead of time via `./build.sh image` or
 // `.\build.ps1 image`; setup fails if it isn't present locally.
 func setupRuntime(ctx context.Context, cfg *config.Config) (executor.Executor, *browser.Browser, func(), error) {
+	log := logging.For("main")
 	docker.CleanupOrphans(ctx, os.Stderr)
 
 	rt, err := docker.New(ctx, docker.Options{
@@ -322,10 +323,12 @@ func setupRuntime(ctx context.Context, cfg *config.Config) (executor.Executor, *
 		return nil, nil, nil, err
 	}
 	if err := rt.Start(ctx); err != nil {
+		_ = rt.Close()
 		return nil, nil, nil, err
 	}
 	if err := rt.WaitHealthy(ctx, 10*time.Second); err != nil {
 		_ = rt.Stop(ctx)
+		_ = rt.Close()
 		return nil, nil, nil, err
 	}
 
@@ -333,6 +336,7 @@ func setupRuntime(ctx context.Context, cfg *config.Config) (executor.Executor, *
 	runner, err := executor.NewDockerExecutor(ctx, rt.Client(), rt.ContainerID(), cmdTimeout)
 	if err != nil {
 		_ = rt.Stop(ctx)
+		_ = rt.Close()
 		return nil, nil, nil, err
 	}
 
@@ -349,6 +353,9 @@ func setupRuntime(ctx context.Context, cfg *config.Config) (executor.Executor, *
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stopCancel()
 		_ = rt.Stop(stopCtx)
+		if err := rt.Close(); err != nil {
+			log.Warn("docker client close failed", "err", err)
+		}
 	}
 	return runner, br, cleanup, nil
 }

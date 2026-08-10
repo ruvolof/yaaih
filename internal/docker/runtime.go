@@ -255,6 +255,17 @@ func (r *Runtime) Stop(ctx context.Context) error {
 	return err
 }
 
+// Close releases the underlying Docker SDK client. Runtime must not be used
+// after Close returns. Safe to call multiple times.
+func (r *Runtime) Close() error {
+	if r.cli == nil {
+		return nil
+	}
+	cli := r.cli
+	r.cli = nil
+	return cli.Close()
+}
+
 // verifyImage fails if the runtime image isn't present locally. The image is
 // expected to be built ahead of time by the project's build script.
 func (r *Runtime) verifyImage(ctx context.Context) error {
