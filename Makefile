@@ -43,6 +43,6 @@ test:
 clean:
 	rm -rf vendor/ .go/ $(BINARY) $(BINARY).exe
 
-# Convenience: run with the example agent in this directory.
+# Convenience: run with the default chatter agent.
 run: build
-	./$(BINARY) --agent ./agent.md
+	./$(BINARY) --agent ./agents/chatter
