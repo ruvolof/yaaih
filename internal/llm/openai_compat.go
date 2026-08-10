@@ -15,7 +15,6 @@ package llm
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -111,8 +110,7 @@ func (p *OpenAICompat) StreamChat(ctx context.Context, req *ChatRequest, cb Stre
 		// Snapshot any chunk that carried token usage. Per OpenRouter docs
 		// cost is included in this same block automatically.
 		if chunk.Usage.TotalTokens > 0 {
-			snap := chunk
-			lastUsageChunk = &snap
+			lastUsageChunk = &chunk
 		}
 	}
 	if err := stream.Err(); err != nil {
@@ -154,9 +152,7 @@ func (p *OpenAICompat) StreamChat(ctx context.Context, req *ChatRequest, cb Stre
 			log.Warn("openrouter cost not present in stream",
 				"generation_id", acc.ID,
 				"had_usage_chunk", lastUsageChunk != nil,
-				"usage_raw", usageRawJSON(lastUsageChunk),
-				"usage_extra_keys", usageExtraKeys(lastUsageChunk),
-				"chunk_extra_keys", chunkExtraKeys(lastUsageChunk),
+				"chunk_raw", rawJSON(lastUsageChunk),
 			)
 		}
 	}
@@ -206,41 +202,14 @@ func extractOpenRouterCost(chunk *openai.ChatCompletionChunk) (float64, bool) {
 	return cost, true
 }
 
-// usageRawJSON returns the raw JSON of the usage block on the given chunk,
-// or "" when the chunk is nil. Used for diagnostic logging when we can't
-// find the cost field — the raw JSON tells us exactly what OpenRouter sent.
-func usageRawJSON(chunk *openai.ChatCompletionChunk) string {
+// rawJSON returns the whole chunk as the provider sent it, or "" when the
+// chunk is nil. Logged when cost extraction misses: the full chunk covers
+// both a renamed field inside `usage` and one that moved to the top level.
+func rawJSON(chunk *openai.ChatCompletionChunk) string {
 	if chunk == nil {
 		return ""
 	}
-	return chunk.Usage.RawJSON()
-}
-
-// usageExtraKeys returns the sorted list of unknown field names inside the
-// chunk's `usage` object. If `cost` isn't there we want to know what is.
-func usageExtraKeys(chunk *openai.ChatCompletionChunk) []string {
-	if chunk == nil {
-		return nil
-	}
-	return sortedKeys(chunk.Usage.JSON.ExtraFields)
-}
-
-// chunkExtraKeys returns the sorted list of unknown field names at the
-// chunk's top level — sometimes vendor extensions land outside `usage`.
-func chunkExtraKeys(chunk *openai.ChatCompletionChunk) []string {
-	if chunk == nil {
-		return nil
-	}
-	return sortedKeys(chunk.JSON.ExtraFields)
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+	return chunk.RawJSON()
 }
 
 // toOpenAIMessages converts our Message slice to the openai-go union type.
