@@ -74,12 +74,20 @@ provider:
 model: "gpt-4o-mini"
 ```
 
-Then export your OpenRouter API key before running:
+Then provide your OpenRouter API key, either in a `.env` file at the project root (git-ignored):
+
+```
+OPENROUTER_API_KEY=your-openrouter-api-key
+```
+
+or by exporting it before running:
 
 ```bash
 export OPENROUTER_API_KEY="your-openrouter-api-key"
 ./build.sh run
 ```
+
+Variables already present in the environment are never overwritten, so an exported value always beats the file. A missing `.env` is not an error.
 
 ### Notes
 
@@ -319,9 +327,9 @@ events (each `executor send`, every agent iteration counter, cwd changes).
    ```bash
    ./build.sh build
    ```
-2. Export the provider API key:
+2. Put the provider API key in `.env` at the project root (or export it):
    ```bash
-   export OPENROUTER_API_KEY="..."
+   echo 'OPENROUTER_API_KEY=...' > .env
    ```
 3. Run the harness:
    ```bash

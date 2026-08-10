@@ -21,6 +21,7 @@ import (
 	"github.com/ruvolof/aibitat-harness-go/internal/browser"
 	"github.com/ruvolof/aibitat-harness-go/internal/config"
 	"github.com/ruvolof/aibitat-harness-go/internal/docker"
+	"github.com/ruvolof/aibitat-harness-go/internal/dotenv"
 	"github.com/ruvolof/aibitat-harness-go/internal/executor"
 	"github.com/ruvolof/aibitat-harness-go/internal/governor"
 	"github.com/ruvolof/aibitat-harness-go/internal/llm"
@@ -57,6 +58,16 @@ func main() {
 	}()
 
 	log := logging.For("main")
+
+	// Populate the environment from a .env file (working directory first, then
+	// next to the binary) before any config is read, so `provider.api_key_env`
+	// resolves without the operator exporting the key by hand. Already-exported
+	// variables take precedence; a missing file is not an error.
+	if path, err := dotenv.LoadDefault(); err != nil {
+		log.Warn("could not load .env", "err", err)
+	} else if path != "" {
+		log.Info("loaded environment file", "path", path)
+	}
 
 	// Recover from panics in the main goroutine. The logging package records
 	// the full stack to the log file; we then print a brief summary that
