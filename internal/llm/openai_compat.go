@@ -84,6 +84,10 @@ func (p *OpenAICompat) StreamChat(ctx context.Context, req *ChatRequest, cb Stre
 	)
 
 	stream := p.client.Chat.Completions.NewStreaming(ctx, params)
+	// A stream abandoned before its body reaches EOF — the provider erroring
+	// part-way through a response — parks the socket and its transport
+	// goroutines for the life of the process.
+	defer stream.Close()
 	acc := openai.ChatCompletionAccumulator{}
 
 	var firstChunkAt time.Time
