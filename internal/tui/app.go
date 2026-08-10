@@ -40,6 +40,13 @@ const toastTTL = 2 * time.Second
 // perceives it as live.
 const busyTickInterval = 300 * time.Millisecond
 
+// renderTickInterval is how often streamed assistant deltas are flushed into
+// the chat viewport. Deltas arrive faster than a terminal can usefully
+// repaint (an OpenAI-style stream is often 5–30 chunks per second per token);
+// coalescing them into ~renderTickInterval-spaced repaints keeps the render
+// cost roughly constant per second of streaming rather than per delta.
+const renderTickInterval = 50 * time.Millisecond
+
 // Model is the root BubbleTea model.
 type Model struct {
 	// cfg, ag, and runner are nil in the "agent-less" state (multi-agent mode
@@ -65,6 +72,21 @@ type Model struct {
 	chat      viewport.Model
 	chatBuf   strings.Builder
 	pendingAs strings.Builder // assistant content currently being streamed
+
+	// wrappedBody is chatBuf pre-wrapped to wrapWidth. Kept in sync
+	// incrementally by appendLine so the streaming hot path does not re-wrap
+	// the whole transcript on every AssistantDeltaMsg; a full rebuild happens
+	// only in rebuildWrapped, which is called from renderChat when the width
+	// changes (WindowSizeMsg / relayout). This is the fix for the O(n²) chat
+	// rendering described in REVIEW.md B1.
+	wrappedBody strings.Builder
+	wrapWidth   int // width wrappedBody was computed at; 0 = uninitialized
+
+	// renderPending / renderTicking coalesce bursts of AssistantDeltaMsg into
+	// one repaint every renderTickInterval instead of one per chunk. Cleared
+	// when a tick fires or when AssistantDoneMsg forces a final flush.
+	renderPending  bool
+	renderTicking  bool
 
 	// userScrolled tracks whether the user has manually scrolled the chat
 	// viewport away from the bottom. When true, new content (streaming
@@ -112,6 +134,14 @@ type busyTickMsg struct{}
 
 func busyTick() tea.Cmd {
 	return tea.Tick(busyTickInterval, func(time.Time) tea.Msg { return busyTickMsg{} })
+}
+
+// renderTickMsg is delivered by a tea.Tick to flush any pending streamed
+// deltas into the chat viewport. See renderTickInterval.
+type renderTickMsg struct{}
+
+func renderTick() tea.Cmd {
+	return tea.Tick(renderTickInterval, func(time.Time) tea.Msg { return renderTickMsg{} })
 }
 
 // New constructs the TUI model. Pass the cancellable context the program is
@@ -373,7 +403,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agent.AssistantDeltaMsg:
 		m.pendingAs.WriteString(msg.Text)
-		m.renderChat()
+		m.renderPending = true
+		if !m.renderTicking {
+			m.renderTicking = true
+			cmds = append(cmds, renderTick())
+		}
 		cmds = append(cmds, waitForEvent(m.ag.Events()))
 
 	case agent.AssistantDoneMsg:
@@ -388,6 +422,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastAssistant = plain
 			m.appendLine(rendered)
 		}
+		// appendLine above already flushed. Clear the coalescing flag so any
+		// still-scheduled renderTickMsg becomes a no-op instead of doing a
+		// second identical repaint.
+		m.renderPending = false
 		m.busy = false
 		cmds = append(cmds, waitForEvent(m.ag.Events()))
 
@@ -435,6 +473,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.busy {
 			m.busyFrame++
 			cmds = append(cmds, busyTick())
+		}
+
+	case renderTickMsg:
+		// Coalesced flush: repaint the chat viewport with whatever streamed
+		// deltas have arrived since the last tick. A new delta arriving
+		// after this handler runs will re-arm the tick from the delta
+		// handler, so the chain self-terminates once streaming stops.
+		m.renderTicking = false
+		if m.renderPending {
+			m.renderPending = false
+			m.renderChat()
 		}
 
 	case agentClosedMsg:
@@ -496,7 +545,9 @@ func (m *Model) View() string {
 	return styleApp.Render(full)
 }
 
-// relayout adjusts inner viewport/input widths after a WindowSizeMsg.
+// relayout adjusts inner viewport/input widths after a WindowSizeMsg. The
+// actual wrap-cache rebuild happens inside renderChat when it notices the
+// width has changed.
 func (m *Model) relayout() {
 	sidebarW := m.width / 4
 	if sidebarW < 28 {
@@ -511,17 +562,7 @@ func (m *Model) relayout() {
 	m.chat.Width = chatW
 	m.chat.Height = m.height - inputH - statusH - 4
 	m.input.Width = m.width - 6
-	// Re-wrap on resize so the new width is honoured. See renderChat for
-	// why the explicit wrap is necessary even though the viewport has its
-	// own Width.
-	body := m.chatBuf.String()
-	if chatW > 0 {
-		body = ansi.Wrap(body, chatW, "")
-	}
-	m.chat.SetContent(body)
-	if !m.userScrolled {
-		m.chat.GotoBottom()
-	}
+	m.renderChat()
 }
 
 // renderStatus produces the single-line "status bar" between the chat
@@ -594,7 +635,9 @@ func stripANSI(s string) string {
 // resetChat clears the chat view back to empty. Used when switching sessions.
 func (m *Model) resetChat() {
 	m.chatBuf.Reset()
+	m.wrappedBody.Reset()
 	m.pendingAs.Reset()
+	m.renderPending = false
 	m.lastAssistant = ""
 	m.userScrolled = false
 	m.renderChat()
@@ -656,32 +699,64 @@ func (m *Model) appendLine(s string) {
 		m.chatBuf.WriteString("\n")
 	}
 	m.chatBuf.WriteString(s)
+	if m.wrapWidth > 0 {
+		// Wrap only the new entry and append to the cache — the O(1)-amortised
+		// path that keeps streaming cost independent of transcript length.
+		// ansi.Wrap treats each embedded \n as a hard break, so wrapping one
+		// entry in isolation and joining with \n produces the same visible
+		// output as wrapping the concatenation.
+		if m.wrappedBody.Len() > 0 {
+			m.wrappedBody.WriteString("\n")
+		}
+		m.wrappedBody.WriteString(ansi.Wrap(s, m.wrapWidth, ""))
+	}
 	m.renderChat()
 }
 
 func (m *Model) renderChat() {
-	body := m.chatBuf.String()
-	if m.pendingAs.Len() > 0 {
-		if body != "" {
-			body += "\n"
-		}
-		body += styleAssist.Render(m.pendingAs.String())
+	w := m.chat.Width
+	if w <= 0 {
+		// Viewport not sized yet (pre-WindowSizeMsg). Push the raw text
+		// through so prefilled history isn't lost; the first WindowSizeMsg
+		// arrives soon after and re-renders with wrap.
+		m.chat.SetContent(m.chatBuf.String())
+		return
 	}
-	// Pre-wrap to the viewport's width before handing it to SetContent.
-	// Without this, the viewport's View() picks the last `Height` LOGICAL
-	// lines and then lipgloss re-wraps them — if any of those lines wrap to
-	// multiple visual lines, lipgloss's MaxHeight clips the BOTTOM of the
-	// rendered block, hiding the end of the most recent reply (even though
-	// the buffer has it and AtBottom() reports true). ansi.Wrap is
-	// ANSI-aware (preserves the styling we baked in via lipgloss) and
-	// width-correct for wide-cell characters like emoji.
-	if w := m.chat.Width; w > 0 {
-		body = ansi.Wrap(body, w, "")
+	if m.wrapWidth != w {
+		m.rebuildWrapped(w)
+	}
+	// Pre-wrap the body before handing it to SetContent. Without this the
+	// viewport's View() picks the last Height LOGICAL lines and lipgloss
+	// then re-wraps them — if any wrap to multiple visual lines, lipgloss's
+	// MaxHeight clips the BOTTOM of the rendered block, hiding the end of
+	// the most recent reply. ansi.Wrap is ANSI-aware and width-correct for
+	// wide-cell characters.
+	body := m.wrappedBody.String()
+	if m.pendingAs.Len() > 0 {
+		pending := ansi.Wrap(styleAssist.Render(m.pendingAs.String()), w, "")
+		if body != "" {
+			body = body + "\n" + pending
+		} else {
+			body = pending
+		}
 	}
 	m.chat.SetContent(body)
 	if !m.userScrolled {
 		m.chat.GotoBottom()
 	}
+}
+
+// rebuildWrapped recomputes the wrapped-line cache from chatBuf at the given
+// width. Called from renderChat when the viewport width changes (resize, or
+// the first WindowSizeMsg after startup). Never called on the per-delta hot
+// path — that's the point of the cache.
+func (m *Model) rebuildWrapped(width int) {
+	m.wrapWidth = width
+	m.wrappedBody.Reset()
+	if m.chatBuf.Len() == 0 {
+		return
+	}
+	m.wrappedBody.WriteString(ansi.Wrap(m.chatBuf.String(), width, ""))
 }
 
 func (m *Model) renderSidebar() string {
