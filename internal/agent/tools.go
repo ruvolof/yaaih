@@ -33,36 +33,65 @@ type Tool struct {
 
 // Registry maps tool names to Tool definitions and exposes the slice form
 // passed to the LLM provider. It is safe for concurrent use: the turn loop
-// reads it (Definitions/Get) while an operator-triggered reload may mutate it
-// (Add/RemoveByCapability).
+// reads it (Definitions/Enabled) while an operator-triggered reload may mutate
+// it (Add/RemoveByCapability).
 type Registry struct {
 	mu    sync.RWMutex
 	tools map[string]*Tool
 }
 
+// grantedBy reports whether the agent's capability set unlocks this tool. An
+// untagged tool is always available.
+func (t *Tool) grantedBy(granted map[string]struct{}) bool {
+	if t.Capability == "" {
+		return true
+	}
+	_, ok := granted[t.Capability]
+	return ok
+}
+
+func capabilitySet(caps []string) map[string]struct{} {
+	granted := make(map[string]struct{}, len(caps))
+	for _, capability := range caps {
+		granted[capability] = struct{}{}
+	}
+	return granted
+}
+
 // Definitions returns the tool definitions in stable order, filtered by the
 // agent's declared capabilities (no capability tag means always exposed).
 func (r *Registry) Definitions(caps []string) []llm.ToolDefinition {
-	want := map[string]struct{}{}
-	for _, c := range caps {
-		want[c] = struct{}{}
-	}
+	granted := capabilitySet(caps)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var out []llm.ToolDefinition
 	for _, t := range r.tools {
-		if t.Capability != "" {
-			if _, ok := want[t.Capability]; !ok {
-				continue
-			}
+		if !t.grantedBy(granted) {
+			continue
 		}
 		out = append(out, t.Def)
 	}
 	return out
 }
 
-// Get returns the tool by name.
-func (r *Registry) Get(name string) (*Tool, bool) {
+// Enabled returns the tool by name only when the agent's capabilities grant
+// it, applying the same filter as Definitions. Tool dispatch must go through
+// here: a model can name a tool it was never offered, and the built-ins close
+// over dependencies that only exist for the capabilities the agent declared.
+func (r *Registry) Enabled(name string, caps []string) (*Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.tools[name]
+	if !ok || !t.grantedBy(capabilitySet(caps)) {
+		return nil, false
+	}
+	return t, true
+}
+
+// Lookup returns the tool by name regardless of the agent's capabilities. It
+// answers "is this registered", which is a question about the registry rather
+// than about what the model may call — dispatch belongs in Enabled.
+func (r *Registry) Lookup(name string) (*Tool, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	t, ok := r.tools[name]
@@ -100,7 +129,18 @@ func (r *Registry) RemoveByCapability(capability string) int {
 func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Browser) *Registry {
 	r := &Registry{tools: map[string]*Tool{}}
 
-	r.tools["shell_exec"] = &Tool{
+	// A capability can be declared in agent.md while the sandbox backing it is
+	// absent, so each built-in is registered only once its dependency exists.
+	// An unregistered tool is one the model is never offered and cannot call;
+	// one closing over a nil dependency would panic on the first call.
+	register := func(dependencyReady bool, t *Tool) {
+		if !dependencyReady {
+			return
+		}
+		r.tools[t.Def.Name] = t
+	}
+
+	register(runner != nil, &Tool{
 		Capability: "shell",
 		Restricted: true,
 		Def: llm.ToolDefinition{
@@ -136,10 +176,10 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 			}
 			return out, nil
 		},
-	}
+	})
 
 	// Browser tools — only browser_eval is restricted.
-	r.tools["browser_navigate"] = &Tool{
+	register(br != nil, &Tool{
 		Capability: "browser",
 		Def: llm.ToolDefinition{
 			Name:        "browser_navigate",
@@ -164,9 +204,9 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 			}
 			return "OK: navigated to " + p.URL, nil
 		},
-	}
+	})
 
-	r.tools["browser_content"] = &Tool{
+	register(br != nil, &Tool{
 		Capability: "browser",
 		Def: llm.ToolDefinition{
 			Name:        "browser_content",
@@ -176,9 +216,9 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 		Fn: func(ctx context.Context, args string) (string, error) {
 			return br.Content(ctx)
 		},
-	}
+	})
 
-	r.tools["browser_screenshot"] = &Tool{
+	register(br != nil, &Tool{
 		Capability: "browser",
 		Def: llm.ToolDefinition{
 			Name:        "browser_screenshot",
@@ -195,9 +235,9 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 			}
 			return path, nil
 		},
-	}
+	})
 
-	r.tools["browser_click"] = &Tool{
+	register(br != nil, &Tool{
 		Capability: "browser",
 		Def: llm.ToolDefinition{
 			Name:        "browser_click",
@@ -222,9 +262,9 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 			}
 			return "OK: clicked " + p.Selector, nil
 		},
-	}
+	})
 
-	r.tools["browser_type"] = &Tool{
+	register(br != nil, &Tool{
 		Capability: "browser",
 		Def: llm.ToolDefinition{
 			Name:        "browser_type",
@@ -251,9 +291,9 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 			}
 			return "OK: typed into " + p.Selector, nil
 		},
-	}
+	})
 
-	r.tools["browser_eval"] = &Tool{
+	register(br != nil, &Tool{
 		Capability: "browser",
 		Restricted: true,
 		Def: llm.ToolDefinition{
@@ -276,13 +316,13 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 			}
 			return br.Eval(ctx, p.Script)
 		},
-	}
+	})
 
 	// Filesystem tools — read/list are unrestricted, write is restricted.
 	// All paths are resolved against the workspace root so the agent can't
 	// reach outside the bind mount.
 	workspace := cfg.Runtime.Workspace
-	r.tools["file_read"] = &Tool{
+	register(true, &Tool{
 		Capability: "filesystem",
 		Def: llm.ToolDefinition{
 			Name:        "file_read",
@@ -312,9 +352,9 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 			}
 			return string(data), nil
 		},
-	}
+	})
 
-	r.tools["file_write"] = &Tool{
+	register(true, &Tool{
 		Capability: "filesystem",
 		Restricted: true,
 		Def: llm.ToolDefinition{
@@ -349,9 +389,9 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 			}
 			return fmt.Sprintf("Wrote %d bytes to %s", len(p.Content), p.Path), nil
 		},
-	}
+	})
 
-	r.tools["file_list"] = &Tool{
+	register(true, &Tool{
 		Capability: "filesystem",
 		Def: llm.ToolDefinition{
 			Name:        "file_list",
@@ -389,7 +429,7 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 			}
 			return b.String(), nil
 		},
-	}
+	})
 
 	return r
 }

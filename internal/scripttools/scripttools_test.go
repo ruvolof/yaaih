@@ -135,7 +135,7 @@ func TestRegisterAndInvoke(t *testing.T) {
 	reg := agent.NewRegistry(&config.Config{}, runner, nil)
 	Register(ms, ContainerToolsMount, runner, reg)
 
-	tool, ok := reg.Get("check_url")
+	tool, ok := reg.Lookup("check_url")
 	if !ok {
 		t.Fatalf("tool not registered")
 	}
@@ -173,7 +173,7 @@ func TestRegisterWorkspaceToolChmods(t *testing.T) {
 	runner := &stubRunner{out: "ok\n" + exitMarker + "0\n"}
 	reg := agent.NewRegistry(&config.Config{}, runner, nil)
 	Register(ms, ContainerWorkspaceTools, runner, reg)
-	tool, _ := reg.Get("check_url")
+	tool, _ := reg.Lookup("check_url")
 	if _, err := tool.Fn(context.Background(), `{"url":"http://x"}`); err != nil {
 		t.Fatalf("Fn: %v", err)
 	}
@@ -204,10 +204,10 @@ func TestApplyReplacesScriptToolsOnly(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("registered %d, want 1", n)
 	}
-	if _, ok := reg.Get("check_url"); !ok {
+	if _, ok := reg.Lookup("check_url"); !ok {
 		t.Fatal("check_url not registered after apply")
 	}
-	if _, ok := reg.Get("file_read"); !ok {
+	if _, ok := reg.Lookup("file_read"); !ok {
 		t.Fatal("built-in file_read was wrongly removed by apply")
 	}
 
@@ -224,13 +224,13 @@ func TestApplyReplacesScriptToolsOnly(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("registered %d, want 1", n)
 	}
-	if _, ok := reg.Get("check_url"); ok {
+	if _, ok := reg.Lookup("check_url"); ok {
 		t.Error("check_url should be gone after its manifest was removed and reapplied")
 	}
-	if _, ok := reg.Get("ping"); !ok {
+	if _, ok := reg.Lookup("ping"); !ok {
 		t.Error("ping should be registered after apply")
 	}
-	if _, ok := reg.Get("file_read"); !ok {
+	if _, ok := reg.Lookup("file_read"); !ok {
 		t.Error("built-in file_read was wrongly removed by the second apply")
 	}
 }
@@ -267,7 +267,7 @@ func TestApplyFromWorkspace(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("registered %d from workspace, want 1", n)
 	}
-	if _, ok := reg.Get("ping"); !ok {
+	if _, ok := reg.Lookup("ping"); !ok {
 		t.Error("workspace-authored tool 'ping' not registered with fromWorkspace=true")
 	}
 }
@@ -281,7 +281,7 @@ func TestInvokeNonZeroExit(t *testing.T) {
 	runner := &stubRunner{out: "boom: bad url\n" + exitMarker + "3\n"}
 	reg := agent.NewRegistry(&config.Config{}, runner, nil)
 	Register(ms, ContainerToolsMount, runner, reg)
-	tool, _ := reg.Get("check_url")
+	tool, _ := reg.Lookup("check_url")
 
 	_, err := tool.Fn(context.Background(), `{"url":"http://x"}`)
 	if err == nil {

@@ -428,10 +428,10 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 				"args_len", len(tc.Arguments),
 			)
 
-			tool, ok := a.registry.Get(tc.Name)
+			tool, ok := a.registry.Enabled(tc.Name, a.cfg.Capabilities)
 			if !ok {
 				result := fmt.Sprintf("error: unknown tool %q", tc.Name)
-				log.Warn("unknown tool requested", "name", tc.Name)
+				log.Warn("unknown tool requested", "name", tc.Name, "capabilities", a.cfg.Capabilities)
 				a.events <- ToolCallResultMsg{Name: tc.Name, Result: "", Err: result}
 				a.appendToolResult(tc.ID, tc.Name, result)
 				continue
