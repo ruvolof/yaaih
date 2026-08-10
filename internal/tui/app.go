@@ -103,6 +103,12 @@ type Model struct {
 	busy      bool
 	busyFrame int
 
+	// cancelTurn stops the in-flight turn: it cancels the context handed to
+	// Agent.Send, which unwinds the LLM stream and any running tool. Set when a
+	// turn starts, cleared when one ends. Only esc calls it, and only while
+	// busy — a stale non-nil value between turns is harmless.
+	cancelTurn context.CancelFunc
+
 	// lastAssistant holds the plain-text version of the most recent completed
 	// assistant turn so ctrl+y can copy it without depending on chatBuf's
 	// styling. Updated in the AssistantDoneMsg handler.
@@ -310,6 +316,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "ctrl+d":
 			return m, tea.Quit
+		case "esc":
+			// Stop the running turn. The agent unwinds at its next
+			// cancellation point and reports back with a cancelled
+			// AssistantDoneMsg, so the marker below is a promise that the
+			// turn is stopping, not that it has stopped. Idle, esc does
+			// nothing — the approval modal handles its own esc above.
+			if m.busy && m.cancelTurn != nil {
+				log.Info("operator cancelled turn")
+				m.cancelTurn()
+				cmds = append(cmds, m.setToast("cancelling turn..."))
+			}
+			return m, tea.Batch(cmds...)
 		case "ctrl+y":
 			cmds = append(cmds, m.copyLastReply())
 			return m, tea.Batch(cmds...)
@@ -370,7 +388,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.appendLine(styleUser.Render("You: ") + text)
 				m.input.SetValue("")
 				// Start the "busy" indicator for the duration of the turn.
-				if !m.busy {
+				startsTurn := !m.busy
+				if startsTurn {
 					m.busy = true
 					m.busyFrame = 0
 					cmds = append(cmds, busyTick())
@@ -380,9 +399,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// m itself, since that would pin the whole TUI model into a
 				// background goroutine.
 				ag := m.ag
-				ctx := m.ctx
+				turnCtx, cancelTurn := context.WithCancel(m.ctx)
+				if startsTurn {
+					// A send on top of a running turn is refused by the agent,
+					// so esc has to keep pointing at the turn that is actually
+					// running rather than at the refused call.
+					m.cancelTurn = cancelTurn
+				}
 				sendCmd := func() tea.Msg {
-					ag.Send(ctx, text)
+					defer cancelTurn()
+					ag.Send(turnCtx, text)
 					return nil // events arrive via the event channel
 				}
 				// Do NOT also queue a waitForEvent here. The consumer chain
@@ -422,11 +448,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastAssistant = plain
 			m.appendLine(rendered)
 		}
+		if msg.Cancelled {
+			// Goes after the partial reply so the transcript reads in the
+			// order it happened, and stays in the scrollback so a reply that
+			// stops mid-sentence is explained later, not just in the moment.
+			m.appendLine(styleMuted.Render("⨯ turn cancelled"))
+			cmds = append(cmds, m.setToast("turn cancelled"))
+		}
 		// appendLine above already flushed. Clear the coalescing flag so any
 		// still-scheduled renderTickMsg becomes a no-op instead of doing a
 		// second identical repaint.
 		m.renderPending = false
 		m.busy = false
+		m.cancelTurn = nil
 		cmds = append(cmds, waitForEvent(m.ag.Events()))
 
 	case agent.ToolCallStartMsg:
@@ -567,15 +601,16 @@ func (m *Model) relayout() {
 
 // renderStatus produces the single-line "status bar" between the chat
 // viewport and the input box. While a turn is in flight it shows an
-// animated indicator ("● streaming response.", "..", "...", cycling). When
-// idle the line is blank — the row is always reserved so layout doesn't
-// shift as the agent transitions in and out of busy.
+// animated indicator ("● streaming response.", "..", "...", cycling) and the
+// key that stops the turn. When idle the line is blank — the row is always
+// reserved so layout doesn't shift as the agent transitions in and out of busy.
 func (m *Model) renderStatus(width int) string {
 	if !m.busy {
 		return strings.Repeat(" ", width)
 	}
-	dots := strings.Repeat(".", 1+m.busyFrame%3)
-	line := "● streaming response" + dots
+	dots := 1 + m.busyFrame%3
+	// The trailing spaces keep the hint at a fixed column while the dots cycle.
+	line := "● streaming response" + strings.Repeat(".", dots) + strings.Repeat(" ", 3-dots) + "  [esc] stop"
 	// Pad to full width so the underlying screen doesn't keep stale bytes
 	// from a previous frame.
 	if pad := width - lipgloss.Width(line); pad > 0 {

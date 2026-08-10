@@ -107,6 +107,13 @@ func newTestAgent(t *testing.T, caps []string, prov llm.Provider, runner executo
 // emitted. The agent is closed afterwards, which is what ends the collector.
 func runTurn(t *testing.T, ag *Agent, input string) []Event {
 	t.Helper()
+	return runTurnCtx(t, ag, context.Background(), input)
+}
+
+// runTurnCtx is runTurn with a caller-supplied context, so a test can cancel
+// the turn part-way through the way the operator's stop key does.
+func runTurnCtx(t *testing.T, ag *Agent, ctx context.Context, input string) []Event {
+	t.Helper()
 	collected := make(chan []Event, 1)
 	go func() {
 		var events []Event
@@ -116,7 +123,7 @@ func runTurn(t *testing.T, ag *Agent, input string) []Event {
 		collected <- events
 	}()
 
-	ag.Send(context.Background(), input)
+	ag.Send(ctx, input)
 	ag.Close()
 
 	select {

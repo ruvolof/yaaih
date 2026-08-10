@@ -314,17 +314,29 @@ func (e *DockerExecutor) Execute(ctx context.Context, cmd string) (string, error
 	defer cancel()
 
 	out, cwd, err := readUntilPromptFrom(cmdCtx, e.sess.lineCh)
-	if errors.Is(err, context.DeadlineExceeded) {
-		log.Warn("command timed out, restarting bash session",
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		// Either way bash is still running the command and still owns stdin,
+		// so the session cannot be reused — the next command would sit unread
+		// behind this one. Abandon it; the docker exec takes the child with it.
+		cancelled := ctx.Err() != nil
+		reason := "timed out"
+		if cancelled {
+			reason = "cancelled"
+		}
+		log.Warn("command abandoned, restarting bash session",
 			"cmd", truncate(cmd, 200),
+			"reason", reason,
 			"timeout", e.timeout.String(),
 			"out_bytes", len(out),
 		)
 		if rErr := e.restartSession(); rErr != nil {
 			// Restart failed — the executor is now unusable. Mark closed so
 			// subsequent calls fail fast.
-			log.Error("restart after timeout failed; marking executor closed", "err", rErr)
+			log.Error("restart after abandoned command failed; marking executor closed", "err", rErr)
 			e.closed = true
+		}
+		if cancelled {
+			return out, fmt.Errorf("executor: command cancelled: %w", ctx.Err())
 		}
 		return out, &TimeoutError{
 			Command:  cmd,

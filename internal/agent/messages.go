@@ -13,8 +13,11 @@ type AssistantDeltaMsg struct {
 }
 
 // AssistantDoneMsg fires when the model has finished a turn (any tool calls
-// will have already been executed and folded back in).
-type AssistantDoneMsg struct{}
+// will have already been executed and folded back in). Cancelled distinguishes
+// a turn the operator stopped from one the model ended on its own.
+type AssistantDoneMsg struct {
+	Cancelled bool
+}
 
 // ToolCallStartMsg announces an imminent tool invocation.
 type ToolCallStartMsg struct {

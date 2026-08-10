@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -350,6 +351,10 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 	}
 
 	for iter := 0; iter < maxIter; iter++ {
+		if ctx.Err() != nil {
+			a.endCancelled(nil)
+			return
+		}
 		log.Debug("iteration", "n", iter+1, "max", maxIter)
 		req := &llm.ChatRequest{
 			Model:    a.cfg.Model,
@@ -364,8 +369,19 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 		// intended to call another tool, so ending the turn would strand
 		// the conversation. A legitimate end-of-turn carries usage
 		// tokens and is left alone.
-		resp, err := a.callLLMWithRetry(ctx, req, iter+1)
+		resp, streamed, err := a.callLLMWithRetry(ctx, req, iter+1)
 		if err != nil {
+			if ctx.Err() != nil {
+				// The operator stopped the turn mid-stream. Keep whatever the
+				// model had already said: the TUI has shown it, so dropping it
+				// would leave the visible transcript claiming something the
+				// history — and therefore the next turn's prompt — denies.
+				if streamed != "" {
+					a.record(llm.Message{Role: llm.RoleAssistant, Content: streamed})
+				}
+				a.endCancelled(nil)
+				return
+			}
 			log.Error("LLM call failed", "err", err, "iter", iter+1)
 			a.events <- ErrorMsg{Err: fmt.Sprintf("llm error: %v", err)}
 			return
@@ -420,7 +436,11 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 		log.Info("dispatching tool calls", "iter", iter+1, "count", len(resp.ToolCalls))
 
 		// Execute tool calls and append their results.
-		for _, tc := range resp.ToolCalls {
+		for idx, tc := range resp.ToolCalls {
+			if ctx.Err() != nil {
+				a.endCancelled(resp.ToolCalls[idx:])
+				return
+			}
 			a.events <- ToolCallStartMsg{Name: tc.Name, Args: tc.Arguments}
 			log.Info("tool call",
 				"name", tc.Name,
@@ -440,6 +460,10 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 			if tool.Restricted {
 				decision, err := a.gate.Request(ctx, tc.Name, prettyJSON(tc.Arguments))
 				if err != nil {
+					if ctx.Err() != nil {
+						a.endCancelled(resp.ToolCalls[idx:])
+						return
+					}
 					log.Error("gatekeeper failed", "tool", tc.Name, "err", err)
 					a.events <- ErrorMsg{Err: fmt.Sprintf("gatekeeper: %v", err)}
 					return
@@ -455,14 +479,8 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 					continue
 				case ApprovalCancel:
 					log.Info("turn cancelled by operator at tool call", "tool", tc.Name)
-					// Append a tool result so the conversation history
-					// stays consistent (the model's preceding tool_call
-					// would otherwise be unanswered, which most providers
-					// reject on the next turn).
-					a.appendToolResult(tc.ID, tc.Name,
-						"error: cancelled by operator. The user has stopped this turn and will respond directly. Do not retry.")
 					a.events <- ToolCallResultMsg{Name: tc.Name, Err: "cancelled by operator"}
-					a.events <- AssistantDoneMsg{}
+					a.endCancelled(resp.ToolCalls[idx:])
 					return
 				}
 			}
@@ -471,6 +489,11 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 			result, err := tool.Fn(ctx, tc.Arguments)
 			elapsed := time.Since(toolStart)
 			if err != nil {
+				if ctx.Err() != nil {
+					a.events <- ToolCallResultMsg{Name: tc.Name, Err: "cancelled by operator"}
+					a.endCancelled(resp.ToolCalls[idx:])
+					return
+				}
 				log.Error("tool failed",
 					"name", tc.Name,
 					"err", err,
@@ -497,6 +520,24 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 
 	log.Warn("max tool iterations reached", "max", maxIter)
 	a.events <- ErrorMsg{Err: fmt.Sprintf("max tool iterations (%d) reached", maxIter)}
+}
+
+// cancelledToolResult answers a tool call the operator stopped before it could
+// run. The wording tells the model the stop was deliberate and that the
+// operator is about to speak, so it does not re-propose the same call the
+// moment it gets another turn.
+const cancelledToolResult = "error: cancelled by operator. The user has stopped this turn and will respond directly. Do not retry."
+
+// endCancelled closes out a turn the operator stopped. Every call in unanswered
+// gets a synthetic result first: an assistant message whose tool_calls have no
+// matching tool replies is rejected by most providers, so leaving one dangling
+// would break not just this turn but every turn after it.
+func (a *Agent) endCancelled(unanswered []llm.ToolCall) {
+	for _, tc := range unanswered {
+		a.appendToolResult(tc.ID, tc.Name, cancelledToolResult)
+	}
+	log.Info("turn cancelled", "unanswered_tool_calls", len(unanswered))
+	a.events <- AssistantDoneMsg{Cancelled: true}
 }
 
 // maxEmptyLLMRetries is the number of times we'll re-issue the same
@@ -527,9 +568,14 @@ func isEmptyGlitch(resp *llm.ChatResponse) bool {
 // reply land slightly later, no rewind needed. Returns the final
 // response (possibly still empty, if all retries glitched) or any
 // hard error.
-func (a *Agent) callLLMWithRetry(ctx context.Context, req *llm.ChatRequest, iter int) (*llm.ChatResponse, error) {
+//
+// streamed is the content emitted so far, which on an aborted stream is the
+// only copy: StreamChat returns no response alongside an error.
+func (a *Agent) callLLMWithRetry(ctx context.Context, req *llm.ChatRequest, iter int) (resp *llm.ChatResponse, streamed string, err error) {
+	var content strings.Builder
 	cb := func(ev llm.StreamEvent) {
 		if ev.DeltaText != "" {
+			content.WriteString(ev.DeltaText)
 			a.events <- AssistantDeltaMsg{Text: ev.DeltaText}
 		}
 	}
@@ -541,22 +587,22 @@ func (a *Agent) callLLMWithRetry(ctx context.Context, req *llm.ChatRequest, iter
 				"iter", iter, "attempt", attempt, "max", maxEmptyLLMRetries)
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, content.String(), ctx.Err()
 			case <-time.After(emptyRetryBackoff):
 			}
 		}
 		resp, err := a.prov.StreamChat(ctx, req, cb)
 		if err != nil {
-			return nil, err
+			return nil, content.String(), err
 		}
 		lastResp = resp
 		if !isEmptyGlitch(resp) {
-			return resp, nil
+			return resp, content.String(), nil
 		}
 	}
 	// All retries returned empty glitches. Let the caller decide what to
 	// do with it; we surface a notice from there.
-	return lastResp, nil
+	return lastResp, content.String(), nil
 }
 
 // appendToolResult records a tool response in the conversation history and
