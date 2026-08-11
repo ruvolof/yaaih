@@ -8,11 +8,12 @@
 #   .\build.ps1 build    # build the binary using vendored deps
 #   .\build.ps1 image    # build the runtime Docker image from the repo root Dockerfile
 #   .\build.ps1 run      # build binary, build runtime image if missing, and run the harness
+#   .\build.ps1 update-playwright # upgrade playwright-go, then report the matching Dockerfile base image
 #   .\build.ps1 clean    # remove vendor/, .go/, and the binary
 
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('tidy', 'vendor', 'build', 'image', 'run', 'clean')]
+    [ValidateSet('tidy', 'vendor', 'build', 'image', 'run', 'update-playwright', 'clean')]
     [string]$Target = 'build'
 )
 
@@ -49,6 +50,22 @@ switch ($Target) {
         & $go build -mod=vendor -o aibitat-harness-go.exe .
     }
     'image'  { Build-RuntimeImage }
+    'update-playwright' {
+        & $go get -u github.com/mxschmitt/playwright-go
+        & $go mod tidy
+        & $go mod vendor
+        $runGo = Join-Path $root 'vendor/github.com/mxschmitt/playwright-go/run.go'
+        $driverVersion = (Select-String -Path $runGo -Pattern 'playwrightCliVersion\s*=\s*"([^"]+)"' |
+            Select-Object -First 1).Matches.Groups[1].Value
+        Write-Host ''
+        if ($driverVersion) {
+            Write-Host "playwright-go now targets Playwright v$driverVersion."
+            Write-Host "Set the Dockerfile base image to mcr.microsoft.com/playwright:v$driverVersion-noble, then run: .\build.ps1 image"
+        } else {
+            Write-Host 'playwright-go updated, but its target Playwright version could not be read.'
+            Write-Host "Check playwrightCliVersion in $runGo, match the Dockerfile base image, then run: .\build.ps1 image"
+        }
+    }
     'run'    {
         if (-not (Test-Path (Join-Path $root 'vendor'))) {
             & $go mod tidy

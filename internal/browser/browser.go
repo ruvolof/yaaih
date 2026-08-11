@@ -30,7 +30,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
-	"github.com/playwright-community/playwright-go"
+	"github.com/mxschmitt/playwright-go"
 
 	"github.com/ruvolof/aibitat-harness-go/internal/logging"
 )
@@ -82,14 +82,17 @@ func (b *Browser) init(ctx context.Context) error {
 		return errors.New("browser: missing docker client or container id")
 	}
 
-	// 1. Locate the Chromium binary inside the image. The playwright base
-	//    ships it under chromium-XXX/chrome-linux/chrome or
-	//    chromium_headless_shell-XXX/chrome-linux/chrome; we accept either.
+	// 1. Locate the Chromium binary inside the image. The playwright base ships
+	//    it under chromium-XXX/, in a directory whose name tracks the upstream
+	//    build layout: chrome-linux/ on older releases, chrome-linux64/ since
+	//    Chrome-for-Testing. The headless-shell build sits alongside it but
+	//    names its binary headless_shell/chrome-headless-shell, so it never
+	//    matches here.
 	//    Failing fast here beats a 10 s CDP timeout when the image changes.
 	chromePath := strings.TrimSpace(b.execCapture(ctx,
-		"ls /ms-playwright/*/chrome-linux/chrome 2>/dev/null | head -n1"))
+		"ls /ms-playwright/*/chrome-linux*/chrome 2>/dev/null | head -n1"))
 	if chromePath == "" {
-		return errors.New("browser: chromium binary not found under /ms-playwright/*/chrome-linux/chrome — did the runtime image change?")
+		return errors.New("browser: chromium binary not found under /ms-playwright/*/chrome-linux*/chrome — did the runtime image change?")
 	}
 	log.Info("found chromium", "path", chromePath)
 

@@ -36,15 +36,16 @@ target="${1:-build}"
 
 usage() {
   cat <<EOF
-Usage: $0 {tidy|vendor|build|image|run|clean}
+Usage: $0 {tidy|vendor|build|image|run|update-playwright|clean}
 
 Targets:
-  tidy    - download dependencies into ./.go/pkg/mod
-  vendor  - tidy + go mod vendor
-  build   - build binary using vendored deps
-  image   - build the runtime Docker image from the repo root Dockerfile
-  run     - build binary, build runtime image if missing, and run the harness with ./agents/chatter
-  clean   - remove vendor/, .go/, and the binary
+  tidy              - download dependencies into ./.go/pkg/mod
+  vendor            - tidy + go mod vendor
+  build             - build binary using vendored deps
+  image             - build the runtime Docker image from the repo root Dockerfile
+  run               - build binary, build runtime image if missing, and run the harness with ./agents/chatter
+  update-playwright - upgrade playwright-go to latest stable, then report the matching Dockerfile base image
+  clean             - remove vendor/, .go/, and the binary
 EOF
 }
 
@@ -65,6 +66,21 @@ case "$target" in
     ;;
   image)
     docker build -t "$IMAGE" -f "$root/Dockerfile" "$root"
+    ;;
+  update-playwright)
+    go get -u github.com/mxschmitt/playwright-go
+    go mod tidy
+    go mod vendor
+    driver_version=$(sed -n 's/.*playwrightCliVersion *= *"\([^"]*\)".*/\1/p' \
+      "$root/vendor/github.com/mxschmitt/playwright-go/run.go" | head -n1)
+    echo
+    if [ -n "$driver_version" ]; then
+      echo "playwright-go now targets Playwright v$driver_version."
+      echo "Set the Dockerfile base image to mcr.microsoft.com/playwright:v$driver_version-noble, then run: $0 image"
+    else
+      echo "playwright-go updated, but its target Playwright version could not be read."
+      echo "Check playwrightCliVersion in vendor/github.com/mxschmitt/playwright-go/run.go, match the Dockerfile base image, then run: $0 image"
+    fi
     ;;
   run)
     if [ ! -d "$root/vendor" ]; then

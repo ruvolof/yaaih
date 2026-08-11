@@ -7,7 +7,11 @@
 #
 # Built locally by `make image` or auto-built by the harness on first run.
 
-FROM mcr.microsoft.com/playwright:v1.49.0-noble
+# This tag must match the Playwright release that the vendored playwright-go
+# targets: the harness drives this container's Chromium from the host, and the
+# two ends speak a versioned protocol. `./build.sh update-playwright` bumps
+# playwright-go and reports the tag to use here.
+FROM mcr.microsoft.com/playwright:v1.61.1-noble
 
 # Tooling commonly invoked by agents, plus socat which the harness uses to
 # expose Chromium's CDP port: starting with Chrome 132, the browser's
