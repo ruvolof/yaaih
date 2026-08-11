@@ -93,6 +93,17 @@ type Options struct {
 	SupportsVision    bool `yaml:"supports_vision"`
 	MaxToolIterations int  `yaml:"max_tool_iterations"`
 	CommandTimeout    int  `yaml:"command_timeout"` // seconds
+
+	// MaxToolResultBytes bounds how much of a tool's output is kept in the
+	// conversation. History is re-sent on every subsequent request, so this is
+	// the ceiling on what one tool call costs for the rest of the session.
+	// Output above it is truncated head-and-tail, and the full text is written
+	// to the workspace for the agent to grep.
+	MaxToolResultBytes int `yaml:"max_tool_result_bytes"`
+
+	// MaxFileReadLines is the default page size for file_read when the model
+	// does not ask for one.
+	MaxFileReadLines int `yaml:"max_file_read_lines"`
 }
 
 // Defaults applied after parsing if the agent.md leaves fields blank.
@@ -104,6 +115,12 @@ const (
 	defaultSessionsDir   = "sessions"
 	defaultMaxIterations = 25
 	defaultCmdTimeoutSec = 120
+
+	// 32 KiB is roughly 8k tokens: enough for a stack trace, a test run, or a
+	// directory listing to arrive whole, small enough that a handful of them do
+	// not crowd out the conversation.
+	defaultMaxToolResultBytes = 32 << 10
+	defaultMaxFileReadLines   = 500
 )
 
 // Load reads, parses, and validates an agent, applying any command-line
@@ -287,6 +304,12 @@ func applyDefaults(c *Config) {
 	}
 	if c.Options.CommandTimeout == 0 {
 		c.Options.CommandTimeout = defaultCmdTimeoutSec
+	}
+	if c.Options.MaxToolResultBytes == 0 {
+		c.Options.MaxToolResultBytes = defaultMaxToolResultBytes
+	}
+	if c.Options.MaxFileReadLines == 0 {
+		c.Options.MaxFileReadLines = defaultMaxFileReadLines
 	}
 }
 

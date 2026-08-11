@@ -65,15 +65,20 @@ func toolCallResponse(id, name, args string) *llm.ChatResponse {
 }
 
 // stubRunner stands in for the sandbox executor and counts what reached it.
+// output, when set, is what every command returns.
 type stubRunner struct {
 	mu       sync.Mutex
 	commands []string
+	output   string
 }
 
 func (r *stubRunner) Execute(ctx context.Context, cmd string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.commands = append(r.commands, cmd)
+	if r.output != "" {
+		return r.output, nil
+	}
 	return "stub output", nil
 }
 
@@ -93,11 +98,24 @@ func toolDef(name string) llm.ToolDefinition {
 
 func newTestAgent(t *testing.T, caps []string, prov llm.Provider, runner executor.Executor) *Agent {
 	t.Helper()
+	return newTestAgentWithOptions(t, caps, prov, runner, config.Options{
+		MaxToolIterations:  5,
+		MaxToolResultBytes: testToolResultBudget,
+		MaxFileReadLines:   50,
+	})
+}
+
+// testToolResultBudget is small enough that a test can overrun it with a
+// readable amount of text.
+const testToolResultBudget = 2048
+
+func newTestAgentWithOptions(t *testing.T, caps []string, prov llm.Provider, runner executor.Executor, opts config.Options) *Agent {
+	t.Helper()
 	cfg := &config.Config{
 		Model:        "stub-model",
 		Capabilities: caps,
 		Runtime:      config.RuntimeCfg{Workspace: t.TempDir()},
-		Options:      config.Options{MaxToolIterations: 5},
+		Options:      opts,
 	}
 	return New(cfg, prov, governor.New(cfg.Model), governor.New(cfg.Model),
 		runner, nil, NewGatekeeper(false), nil, nil, t.TempDir())

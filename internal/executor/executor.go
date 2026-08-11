@@ -39,6 +39,7 @@ import (
 	"github.com/docker/docker/pkg/stdcopy"
 
 	"github.com/ruvolof/aibitat-harness-go/internal/logging"
+	"github.com/ruvolof/aibitat-harness-go/internal/toolout"
 )
 
 var log = logging.For("executor")
@@ -53,9 +54,20 @@ const promptMark = "__HARNESS_PROMPT__"
 // the reader; small enough that runaway output is bounded.
 const readerChanBuf = 1024
 
+// maxCapturedBytes bounds how much of one command's output the harness holds in
+// memory. It is a ceiling against `cat` of a huge file, not a context budget —
+// what the model actually receives is bounded far lower, further up the stack.
+const maxCapturedBytes = 8 << 20
+
+// ContainerWorkspace is where the host workspace is bind-mounted inside the
+// sandbox. A path handed to the model has to be expressed against this root:
+// the host path the harness writes to does not exist in the container the model
+// runs its commands in.
+const ContainerWorkspace = "/workspace"
+
 // initialCWD is the working directory bash starts in. Mirrored in the exec
 // config's WorkingDir below.
-const initialCWD = "/workspace"
+const initialCWD = ContainerWorkspace
 
 // TimeoutError is returned when a command exceeds the executor's timeout. The
 // TUI renders this distinctly so the operator can decide whether to raise the
@@ -207,7 +219,7 @@ func (e *DockerExecutor) openSession(ctx context.Context) (*session, string, err
 	}
 	initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	_, cwd, err := readUntilPromptFrom(initCtx, s.lineCh)
+	_, cwd, _, err := readUntilPromptFrom(initCtx, s.lineCh, maxCapturedBytes)
 	if err != nil {
 		s.close()
 		return nil, "", fmt.Errorf("executor: read initial prompt: %w", err)
@@ -263,23 +275,35 @@ func (s *session) drainPending() {
 // readUntilPromptFrom consumes lines from ch until one contains promptMark.
 // Cancellable via ctx; if ctx expires it returns whatever has been buffered
 // so far plus ctx.Err().
-func readUntilPromptFrom(ctx context.Context, ch <-chan readResult) (output, cwd string, err error) {
+//
+// maxBytes caps what is retained, not what is consumed: the loop must reach the
+// sentinel either way, or the abandoned tail of this command's output would be
+// read as the next command's result. Whole lines are dropped rather than split,
+// so the retained text is never cut mid-rune. Zero means no cap.
+func readUntilPromptFrom(ctx context.Context, ch <-chan readResult, maxBytes int) (output, cwd string, discarded int, err error) {
 	var buf bytes.Buffer
+	keep := func(line string) {
+		if maxBytes > 0 && buf.Len()+len(line) > maxBytes {
+			discarded += len(line)
+			return
+		}
+		buf.WriteString(line)
+	}
 	for {
 		select {
 		case <-ctx.Done():
-			return buf.String(), "", ctx.Err()
+			return buf.String(), "", discarded, ctx.Err()
 		case rr := <-ch:
 			if rr.err != nil {
-				return buf.String(), "", rr.err
+				return buf.String(), "", discarded, rr.err
 			}
 			line := rr.line
 			if idx := strings.Index(line, promptMark+":"); idx >= 0 {
-				buf.WriteString(line[:idx])
+				keep(line[:idx])
 				rest := strings.TrimRight(line[idx+len(promptMark)+1:], "\r\n")
-				return buf.String(), rest, nil
+				return buf.String(), rest, discarded, nil
 			}
-			buf.WriteString(line)
+			keep(line)
 		}
 	}
 }
@@ -313,7 +337,7 @@ func (e *DockerExecutor) Execute(ctx context.Context, cmd string) (string, error
 	cmdCtx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
-	out, cwd, err := readUntilPromptFrom(cmdCtx, e.sess.lineCh)
+	out, cwd, discarded, err := readUntilPromptFrom(cmdCtx, e.sess.lineCh, maxCapturedBytes)
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		// Either way bash is still running the command and still owns stdin,
 		// so the session cannot be reused — the next command would sit unread
@@ -354,9 +378,19 @@ func (e *DockerExecutor) Execute(ctx context.Context, cmd string) (string, error
 		log.Debug("cwd changed", "from", e.cwd, "to", cwd)
 		e.cwd = cwd
 	}
+	if discarded > 0 {
+		log.Warn("command output exceeded the capture cap",
+			"cmd", truncate(cmd, 100),
+			"discarded_bytes", discarded,
+			"cap_bytes", maxCapturedBytes,
+		)
+		out += fmt.Sprintf("\n[%s of output was dropped as it arrived: this command exceeded the executor's %s capture cap. Re-run it filtered — grep, head, tail — to see the part you need.]\n",
+			toolout.HumanBytes(discarded), toolout.HumanBytes(maxCapturedBytes))
+	}
 	log.Info("result",
 		"cmd", truncate(cmd, 100),
 		"out_bytes", len(out),
+		"discarded_bytes", discarded,
 		"elapsed_ms", time.Since(start).Milliseconds(),
 		"cwd", e.cwd,
 	)

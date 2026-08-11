@@ -23,6 +23,7 @@ import (
 	"github.com/ruvolof/aibitat-harness-go/internal/llm"
 	"github.com/ruvolof/aibitat-harness-go/internal/logging"
 	"github.com/ruvolof/aibitat-harness-go/internal/session"
+	"github.com/ruvolof/aibitat-harness-go/internal/toolout"
 )
 
 var log = logging.For("agent")
@@ -607,13 +608,51 @@ func (a *Agent) callLLMWithRetry(ctx context.Context, req *llm.ChatRequest, iter
 
 // appendToolResult records a tool response in the conversation history and
 // persists it to the session file.
+//
+// The result is reduced to the configured budget first, and it is the reduced
+// form that is both sent and stored. A tool result is not a one-off cost: it is
+// replayed to the provider on every later iteration of this turn and every
+// later turn in the session, so one unbounded output raises the price of
+// everything that follows and eventually pushes the session past the context
+// limit for good. Storing the reduced form keeps a resumed transcript honest
+// about what the model was actually shown.
 func (a *Agent) appendToolResult(toolCallID, name, content string) {
 	a.record(llm.Message{
 		Role:       llm.RoleTool,
-		Content:    content,
+		Content:    a.reduceToolResult(toolCallID, name, content),
 		ToolCallID: toolCallID,
 		Name:       name,
 	})
+}
+
+// reduceToolResult normalises a tool result and bounds it to the configured
+// budget, spilling the full text to the workspace when anything is dropped so
+// the agent can still reach it.
+func (a *Agent) reduceToolResult(toolCallID, name, content string) string {
+	budget := a.cfg.Options.MaxToolResultBytes
+	normalized, stats := toolout.Normalize(content)
+
+	var note string
+	if len(normalized) > budget && budget > 0 {
+		note = a.spillToolResult(toolCallID, name, normalized)
+	}
+
+	reduced, cut := toolout.Truncate(normalized, budget, note)
+	stats.TruncatedBytes = cut.TruncatedBytes
+	stats.FinalBytes = cut.FinalBytes
+
+	if stats.Removed() > 0 {
+		log.Info("tool result reduced",
+			"tool", name,
+			"original_bytes", stats.OriginalBytes,
+			"final_bytes", stats.FinalBytes,
+			"ansi_bytes", stats.ANSIBytes,
+			"progress_bytes", stats.ProgressBytes,
+			"repeat_bytes", stats.RepeatBytes,
+			"truncated_bytes", stats.TruncatedBytes,
+		)
+	}
+	return reduced
 }
 
 func (a *Agent) snapshotMessages() []llm.Message {

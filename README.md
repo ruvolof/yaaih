@@ -178,6 +178,8 @@ runtime:
 - `options.supports_vision`: `true` or `false`
 - `options.max_tool_iterations`: integer
 - `options.command_timeout`: seconds
+- `options.max_tool_result_bytes`: bytes of tool output kept in the conversation (default 32768)
+- `options.max_file_read_lines`: default page size for `file_read` (default 500)
 
 ### Example agent
 
@@ -201,6 +203,8 @@ options:
   supports_vision: false
   max_tool_iterations: 25
   command_timeout: 120
+  max_tool_result_bytes: 32768
+  max_file_read_lines: 500
 ---
 
 Your Markdown system prompt goes here.
@@ -225,6 +229,26 @@ From `internal/config/config.go`:
 - `options.supports_vision` (bool)
 - `options.max_tool_iterations` (int)
 - `options.command_timeout` (int)
+- `options.max_tool_result_bytes` (int)
+- `options.max_file_read_lines` (int)
+
+### Tool output size
+
+Tool results are replayed to the provider on every later request in the session,
+so an unbounded one is charged again on every turn that follows it. Before a
+result is recorded the harness strips terminal noise that carries no information
+— ANSI escapes, carriage-return progress repaints, runs of identical lines — and
+then bounds whatever is left to `options.max_tool_result_bytes`, keeping the head
+and the tail.
+
+Nothing is lost when that bound bites. The full output is written to
+`<workspace>/.harness/tool-output/`, and the truncation marker names the file so
+the agent can `grep` it (with `shell_exec`) or page through it (with
+`file_read`). That directory is pruned oldest-first once it passes 64 MiB.
+
+`file_read` returns `options.max_file_read_lines` lines at a time with a header
+naming the range and the file's total line count, so reading part of a large file
+is the normal path rather than a workaround.
 
 ## 6) Notes on the runtime container
 

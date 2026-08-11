@@ -2,10 +2,12 @@
 package agent
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/ruvolof/aibitat-harness-go/internal/config"
 	"github.com/ruvolof/aibitat-harness-go/internal/executor"
 	"github.com/ruvolof/aibitat-harness-go/internal/llm"
+	"github.com/ruvolof/aibitat-harness-go/internal/toolout"
 )
 
 // ToolFunc is the runtime implementation of a tool. It receives the raw JSON
@@ -144,8 +147,13 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 		Capability: "shell",
 		Restricted: true,
 		Def: llm.ToolDefinition{
-			Name:        "shell_exec",
-			Description: "Execute a shell command in the persistent bash session inside the sandbox container. CWD and env vars persist across calls.",
+			Name: "shell_exec",
+			Description: fmt.Sprintf(
+				"Execute a shell command in the persistent bash session inside the sandbox container. CWD and env vars persist across calls. "+
+					"Output above %s is cut down before you see it — the first and last part are kept and the full text is written to a file "+
+					"named in the result, which you can then grep. Filtering in the command itself (grep, head, tail, wc) gets you a better "+
+					"answer than reading the cut-down version of an unfiltered one.",
+				toolout.HumanBytes(cfg.Options.MaxToolResultBytes)),
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -322,22 +330,37 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 	// All paths are resolved against the workspace root so the agent can't
 	// reach outside the bind mount.
 	workspace := cfg.Runtime.Workspace
+	defaultReadLines := cfg.Options.MaxFileReadLines
 	register(true, &Tool{
 		Capability: "filesystem",
 		Def: llm.ToolDefinition{
-			Name:        "file_read",
-			Description: "Read a UTF-8 file from the workspace. Path is relative to the workspace root.",
+			Name: "file_read",
+			Description: fmt.Sprintf(
+				"Read a UTF-8 file from the workspace, one page of lines at a time. Path is relative to the workspace root. "+
+					"Returns %d lines by default, preceded by a header naming the range read and the file's total line count; "+
+					"pass offset and limit to move the window. Reading a targeted range is much cheaper than paging through a "+
+					"whole large file, so narrow it down first when you know what you are looking for.", defaultReadLines),
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"path": map[string]any{"type": "string"},
+					"offset": map[string]any{
+						"type":        "integer",
+						"description": "First line to read, 1-based. Defaults to 1.",
+					},
+					"limit": map[string]any{
+						"type":        "integer",
+						"description": fmt.Sprintf("How many lines to read. Defaults to %d.", defaultReadLines),
+					},
 				},
 				"required": []string{"path"},
 			},
 		},
 		Fn: func(ctx context.Context, args string) (string, error) {
 			var p struct {
-				Path string `json:"path"`
+				Path   string `json:"path"`
+				Offset int    `json:"offset"`
+				Limit  int    `json:"limit"`
 			}
 			if err := json.Unmarshal([]byte(args), &p); err != nil {
 				return "", err
@@ -346,11 +369,17 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 			if err != nil {
 				return "", err
 			}
-			data, err := os.ReadFile(full)
+			if p.Offset <= 0 {
+				p.Offset = 1
+			}
+			if p.Limit <= 0 {
+				p.Limit = defaultReadLines
+			}
+			window, total, err := readFileWindow(full, p.Offset, p.Limit)
 			if err != nil {
 				return "", err
 			}
-			return string(data), nil
+			return describeWindow(p.Path, p.Offset, p.Limit, total) + window, nil
 		},
 	})
 
@@ -432,6 +461,54 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 	})
 
 	return r
+}
+
+// readFileWindow returns the lines of a file in [offset, offset+limit) along
+// with its total line count. Lines are streamed rather than read whole so the
+// cost is the window, not the file — and so a file with one enormous line
+// yields that line instead of an error.
+func readFileWindow(fullPath string, offset, limit int) (window string, total int, err error) {
+	file, err := os.Open(fullPath)
+	if err != nil {
+		return "", 0, err
+	}
+	defer file.Close()
+
+	reader := bufio.NewReader(file)
+	var out strings.Builder
+	for {
+		line, readErr := reader.ReadString('\n')
+		if line != "" {
+			total++
+			if total >= offset && total < offset+limit {
+				out.WriteString(line)
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return out.String(), total, nil
+			}
+			return "", 0, readErr
+		}
+	}
+}
+
+// describeWindow is the header above a page of file content: which lines these
+// are, how many there are in total, and how to ask for the next page. Without
+// it a page reads like a whole file that happens to end abruptly.
+func describeWindow(displayPath string, offset, limit, total int) string {
+	if total == 0 {
+		return fmt.Sprintf("[%s: empty file]\n", displayPath)
+	}
+	if offset > total {
+		return fmt.Sprintf("[%s: offset %d is past the end; the file has %d lines]\n", displayPath, offset, total)
+	}
+	last := min(offset+limit-1, total)
+	if last < total {
+		return fmt.Sprintf("[%s: lines %d-%d of %d — call again with offset %d for the next page]\n",
+			displayPath, offset, last, total, last+1)
+	}
+	return fmt.Sprintf("[%s: lines %d-%d of %d]\n", displayPath, offset, last, total)
 }
 
 func emptyObjectSchema() map[string]any {
