@@ -104,6 +104,12 @@ type Options struct {
 	// MaxFileReadLines is the default page size for file_read when the model
 	// does not ask for one.
 	MaxFileReadLines int `yaml:"max_file_read_lines"`
+
+	// MaxContextTokens is the ceiling on one request: system prompt, tool
+	// definitions, and conversation together. Above it the oldest exchanges stop
+	// being sent. Leave headroom below the model's real context window for the
+	// reply. Zero or less sends the whole conversation however large it grows.
+	MaxContextTokens int `yaml:"max_context_tokens"`
 }
 
 // Defaults applied after parsing if the agent.md leaves fields blank.
@@ -121,6 +127,12 @@ const (
 	// not crowd out the conversation.
 	defaultMaxToolResultBytes = 32 << 10
 	defaultMaxFileReadLines   = 500
+
+	// Comfortably inside every model the harness is pointed at today, and low
+	// enough to keep the per-turn bill of a long autonomous run bounded: the
+	// conversation is re-sent on every iteration, so this number is paid again
+	// and again. Agents on a smaller model must lower it.
+	defaultMaxContextTokens = 64_000
 )
 
 // Load reads, parses, and validates an agent, applying any command-line
@@ -310,6 +322,9 @@ func applyDefaults(c *Config) {
 	}
 	if c.Options.MaxFileReadLines == 0 {
 		c.Options.MaxFileReadLines = defaultMaxFileReadLines
+	}
+	if c.Options.MaxContextTokens == 0 {
+		c.Options.MaxContextTokens = defaultMaxContextTokens
 	}
 }
 

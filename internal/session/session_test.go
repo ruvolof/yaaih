@@ -313,3 +313,139 @@ func indexOf(haystack, needle string) int {
 	}
 	return -1
 }
+
+// appendMessages is the transcript a compaction is written on top of.
+func appendMessages(t *testing.T, w *Writer, msgs []llm.Message) {
+	t.Helper()
+	for i, m := range msgs {
+		entry := Entry{
+			Seq: i + 1, Role: string(m.Role), Content: m.Content,
+			ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID, Name: m.Name,
+		}
+		if err := w.Append(entry); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+}
+
+// A compacted session has to reopen compacted. Anything else would restore the
+// conversation the operator paid a model call to be rid of.
+func TestLoadAppliesCompaction(t *testing.T) {
+	base := t.TempDir()
+	id := ID("20260605-101122-cmpA")
+	w, err := NewWriter(base, testHeader(id))
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	appendMessages(t, w, []llm.Message{
+		{Role: llm.RoleSystem, Content: "You are a DevOps Agent."},
+		{Role: llm.RoleUser, Content: "deploy staging"},
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "call_abc", Name: "shell_exec", Arguments: `{"command":"ls"}`}}},
+		{Role: llm.RoleTool, ToolCallID: "call_abc", Name: "shell_exec", Content: "README.md\n"},
+		{Role: llm.RoleAssistant, Content: "Deployed."},
+		{Role: llm.RoleUser, Content: "now the metrics"},
+	})
+	if err := w.AppendCompaction(Compaction{
+		Seq: 7, From: 1, Through: 5, Role: string(llm.RoleSystem), Content: "Staging was deployed from README.md.",
+	}); err != nil {
+		t.Fatalf("AppendCompaction: %v", err)
+	}
+	if err := w.Close("clean"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	_, msgs, _, err := Load(base, id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []llm.Message{
+		{Role: llm.RoleSystem, Content: "You are a DevOps Agent."},
+		{Role: llm.RoleSystem, Content: "Staging was deployed from README.md."},
+		{Role: llm.RoleUser, Content: "now the metrics"},
+	}
+	if len(msgs) != len(want) {
+		t.Fatalf("loaded %d messages, want %d: %+v", len(msgs), len(want), msgs)
+	}
+	for i := range want {
+		if msgs[i].Role != want[i].Role || msgs[i].Content != want[i].Content {
+			t.Errorf("message %d = %+v, want %+v", i, msgs[i], want[i])
+		}
+	}
+}
+
+// Messages recorded after a compaction belong to the compacted conversation,
+// not to the one that was replaced.
+func TestLoadKeepsWritingAfterACompaction(t *testing.T) {
+	base := t.TempDir()
+	id := ID("20260605-101122-cmpB")
+	w, err := NewWriter(base, testHeader(id))
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	appendMessages(t, w, []llm.Message{
+		{Role: llm.RoleSystem, Content: "system"},
+		{Role: llm.RoleUser, Content: "first"},
+		{Role: llm.RoleAssistant, Content: "first reply"},
+		{Role: llm.RoleUser, Content: "second"},
+	})
+	if err := w.AppendCompaction(Compaction{
+		Seq: 5, From: 1, Through: 3, Role: string(llm.RoleSystem), Content: "summary",
+	}); err != nil {
+		t.Fatalf("AppendCompaction: %v", err)
+	}
+	if err := w.Append(Entry{Seq: 6, Role: string(llm.RoleAssistant), Content: "second reply"}); err != nil {
+		t.Fatalf("Append after compaction: %v", err)
+	}
+	if err := w.Close("clean"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	_, msgs, _, err := Load(base, id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := make([]string, len(msgs))
+	for i, m := range msgs {
+		got[i] = string(m.Role) + ":" + m.Content
+	}
+	want := []string{"system:system", "system:summary", "user:second", "assistant:second reply"}
+	if len(got) != len(want) {
+		t.Fatalf("loaded %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("loaded %v, want %v", got, want)
+		}
+	}
+}
+
+// A range that does not fit the conversation means the file and the reader
+// disagree. Losing the compaction beats losing the session.
+func TestLoadSurvivesAnImpossibleCompactionRange(t *testing.T) {
+	base := t.TempDir()
+	id := ID("20260605-101122-cmpC")
+	w, err := NewWriter(base, testHeader(id))
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	appendMessages(t, w, []llm.Message{
+		{Role: llm.RoleSystem, Content: "system"},
+		{Role: llm.RoleUser, Content: "first"},
+	})
+	if err := w.AppendCompaction(Compaction{
+		Seq: 3, From: 1, Through: 99, Role: string(llm.RoleSystem), Content: "summary",
+	}); err != nil {
+		t.Fatalf("AppendCompaction: %v", err)
+	}
+	if err := w.Close("clean"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	_, msgs, _, err := Load(base, id)
+	if err != nil {
+		t.Fatalf("Load returned an error rather than a usable session: %v", err)
+	}
+	if len(msgs) != 2 || msgs[1].Content != "summary" {
+		t.Errorf("loaded %+v, want the system prompt and the clamped summary", msgs)
+	}
+}

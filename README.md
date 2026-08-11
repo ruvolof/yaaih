@@ -180,6 +180,7 @@ runtime:
 - `options.command_timeout`: seconds
 - `options.max_tool_result_bytes`: bytes of tool output kept in the conversation (default 32768)
 - `options.max_file_read_lines`: default page size for `file_read` (default 500)
+- `options.max_context_tokens`: ceiling on one request's prompt (default 64000)
 
 ### Example agent
 
@@ -205,6 +206,7 @@ options:
   command_timeout: 120
   max_tool_result_bytes: 32768
   max_file_read_lines: 500
+  max_context_tokens: 64000
 ---
 
 Your Markdown system prompt goes here.
@@ -231,6 +233,7 @@ From `internal/config/config.go`:
 - `options.command_timeout` (int)
 - `options.max_tool_result_bytes` (int)
 - `options.max_file_read_lines` (int)
+- `options.max_context_tokens` (int)
 
 ### Tool output size
 
@@ -249,6 +252,32 @@ the agent can `grep` it (with `shell_exec`) or page through it (with
 `file_read` returns `options.max_file_read_lines` lines at a time with a header
 naming the range and the file's total line count, so reading part of a large file
 is the normal path rather than a workaround.
+
+### Context window
+
+The whole conversation is re-sent on every request, so a long session eventually
+outgrows the model — and once it has, every turn fails, including a trivial one.
+`options.max_context_tokens` (default 64000) is the ceiling on one request:
+system prompt, tool definitions, and conversation together. Set it below the
+model's real context window, leaving room for the reply, and lower it for a small
+local model.
+
+Above the ceiling the oldest exchanges stop being sent, an assistant message and
+the tool results answering it at a time, and the model is told how many messages
+it can no longer see. Two things are never dropped: the system prompt, and the
+turn in flight — the question being answered and every result it has produced —
+so a conversation that crosses the ceiling mid-turn keeps going rather than
+breaking. When one turn is too large to fit even on its own, its oldest tool
+results are shortened to their head and tail instead.
+
+This bounds what is *sent*. The session file keeps everything, so a resumed
+transcript still shows the whole conversation. The sidebar's `Context` figure is
+what the last request cost against the ceiling.
+
+Trimming is lossy: the model genuinely stops being able to see what left the
+window. `/compact` replaces the older part of the conversation with a summary of
+it, which keeps the gist at the cost of one extra model call, and is recorded in
+the session file so a resumed session stays compacted.
 
 ## 6) Notes on the runtime container
 

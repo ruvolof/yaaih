@@ -128,9 +128,29 @@ func runTurn(t *testing.T, ag *Agent, input string) []Event {
 	return runTurnCtx(t, ag, context.Background(), input)
 }
 
+// runTurns drives several turns against one agent, the way a session that grows
+// over its context budget accumulates them.
+func runTurns(t *testing.T, ag *Agent, inputs ...string) []Event {
+	t.Helper()
+	return runTurnCtx(t, ag, context.Background(), inputs...)
+}
+
 // runTurnCtx is runTurn with a caller-supplied context, so a test can cancel
 // the turn part-way through the way the operator's stop key does.
-func runTurnCtx(t *testing.T, ag *Agent, ctx context.Context, input string) []Event {
+func runTurnCtx(t *testing.T, ag *Agent, ctx context.Context, inputs ...string) []Event {
+	t.Helper()
+	return collectEvents(t, ag, func() {
+		for _, input := range inputs {
+			ag.Send(ctx, input)
+		}
+	})
+}
+
+// collectEvents runs actions with a reader draining the agent's event channel —
+// which only holds 32 events before the agent blocks on it — and returns
+// everything they emitted. The agent is closed afterwards, which is what ends
+// the collector.
+func collectEvents(t *testing.T, ag *Agent, actions func()) []Event {
 	t.Helper()
 	collected := make(chan []Event, 1)
 	go func() {
@@ -141,7 +161,7 @@ func runTurnCtx(t *testing.T, ag *Agent, ctx context.Context, input string) []Ev
 		collected <- events
 	}()
 
-	ag.Send(ctx, input)
+	actions()
 	ag.Close()
 
 	select {

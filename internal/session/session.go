@@ -76,6 +76,21 @@ type Entry struct {
 	Usage      *Usage         `json:"usage,omitempty"` // set on assistant entries that carried usage
 }
 
+// Compaction records that a span of the conversation was replaced by a summary
+// of it. From and Through are positions in the conversation as it stood when
+// the line was written — a half-open range over the messages Load has rebuilt
+// by the time it reaches this line, which is the same list the agent held.
+// Recording positions rather than sequence numbers is what lets a compaction
+// sit on top of an earlier one without either having to know about the other.
+type Compaction struct {
+	Type    string `json:"type"` // always "compaction"
+	Seq     int    `json:"seq"`
+	From    int    `json:"from_index"`
+	Through int    `json:"through_index"`
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 // footer is the last line of a cleanly-closed session file.
 type footer struct {
 	Type   string `json:"type"` // always "footer"
@@ -168,6 +183,17 @@ func (w *Writer) Append(e Entry) error {
 		return fmt.Errorf("session: writer closed")
 	}
 	return w.writeLine(e)
+}
+
+// AppendCompaction writes one Compaction line and flushes. Thread-safe.
+func (w *Writer) AppendCompaction(c Compaction) error {
+	c.Type = "compaction"
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return fmt.Errorf("session: writer closed")
+	}
+	return w.writeLine(c)
 }
 
 // Close writes a footer with the given reason (clean | signal | crash) and
@@ -327,6 +353,13 @@ func Load(dir string, id ID) (Header, []llm.Message, Usage, error) {
 				ToolCallID: e.ToolCallID,
 				Name:       e.Name,
 			})
+		case "compaction":
+			var c Compaction
+			if err := json.Unmarshal(raw, &c); err != nil {
+				log.Warn("session compaction skipped", "path", path, "line", lineNo, "err", err.Error())
+				continue
+			}
+			msgs = applyCompaction(msgs, c)
 		case "footer":
 			// Diagnostic only; ignored on read.
 		default:
@@ -339,6 +372,39 @@ func Load(dir string, id ID) (Header, []llm.Message, Usage, error) {
 
 	msgs = elideDangling(msgs, answered)
 	return hdr, msgs, usage, nil
+}
+
+// applyCompaction replaces the span a compaction covers with its summary,
+// reproducing the conversation the agent continued with after the operator
+// compacted it.
+//
+// A range that does not fit what has been rebuilt means the file and the reader
+// disagree about the conversation — a message line that failed to parse on the
+// way in, most likely. Loading the transcript uncompacted is a worse answer than
+// loading it at all, so the range is clamped and the discrepancy logged.
+func applyCompaction(msgs []llm.Message, c Compaction) []llm.Message {
+	from := c.From
+	through := c.Through
+	if from < 0 {
+		from = 0
+	}
+	if through > len(msgs) {
+		through = len(msgs)
+	}
+	if from >= through {
+		log.Warn("session compaction covers nothing", "from", c.From, "through", c.Through, "messages", len(msgs))
+		return msgs
+	}
+	if from != c.From || through != c.Through {
+		log.Warn("session compaction range clamped",
+			"from", c.From, "through", c.Through, "messages", len(msgs))
+	}
+
+	summary := llm.Message{Role: llm.Role(c.Role), Content: c.Content}
+	out := make([]llm.Message, 0, len(msgs)-(through-from)+1)
+	out = append(out, msgs[:from]...)
+	out = append(out, summary)
+	return append(out, msgs[through:]...)
 }
 
 // elideDangling drops trailing assistant messages whose tool_calls were never

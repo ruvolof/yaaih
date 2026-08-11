@@ -41,6 +41,7 @@ var (
 	styleToolRes = lipgloss.NewStyle().Foreground(colorMuted)
 	styleOK      = lipgloss.NewStyle().Foreground(colorOK)
 	styleErr     = lipgloss.NewStyle().Foreground(colorErr).Bold(true)
+	styleWarn    = lipgloss.NewStyle().Foreground(colorWarn).Bold(true)
 	styleWarnBlk = lipgloss.NewStyle().
 			Foreground(colorWarn).
 			Border(lipgloss.RoundedBorder()).

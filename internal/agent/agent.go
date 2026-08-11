@@ -20,6 +20,7 @@ import (
 	"github.com/ruvolof/aibitat-harness-go/internal/config"
 	"github.com/ruvolof/aibitat-harness-go/internal/executor"
 	"github.com/ruvolof/aibitat-harness-go/internal/governor"
+	"github.com/ruvolof/aibitat-harness-go/internal/history"
 	"github.com/ruvolof/aibitat-harness-go/internal/llm"
 	"github.com/ruvolof/aibitat-harness-go/internal/logging"
 	"github.com/ruvolof/aibitat-harness-go/internal/session"
@@ -39,6 +40,7 @@ func (ToolCallResultMsg) isAgentEvent()  {}
 func (TimeoutMsg) isAgentEvent()         {}
 func (StatsUpdateMsg) isAgentEvent()     {}
 func (ApprovalRequestMsg) isAgentEvent() {}
+func (HistoryTrimmedMsg) isAgentEvent()  {}
 func (ErrorMsg) isAgentEvent()           {}
 
 // Agent owns the conversation state.
@@ -61,6 +63,15 @@ type Agent struct {
 
 	mu       sync.Mutex
 	messages []llm.Message
+
+	// dropThrough is how far the context window has advanced into messages,
+	// shrunkResults how many tool results it has had to rewrite to fit, and
+	// calibration the estimator's correction against the token counts the
+	// provider reports. All three are read and written on the turn loop's path
+	// to building a request.
+	dropThrough   int
+	shrunkResults int
+	calibration   history.Calibration
 
 	// writer persists the transcript to a JSONL session file. May be nil when
 	// persistence is disabled. seq is the monotonic message sequence number;
@@ -245,6 +256,11 @@ func (a *Agent) resetConversation(w *session.Writer, seed []llm.Message) {
 		atomic.StoreInt64(&a.seq, 0)
 	}
 	a.writer = w
+	// The window's position and what it had to shorten index the conversation
+	// that just went away. The estimator's correction is not reset with them:
+	// that is a property of the model, which has not changed.
+	a.dropThrough = 0
+	a.shrunkResults = 0
 	a.mu.Unlock()
 	// The session-scoped usage restarts from zero; ResumeSession reseeds it from
 	// the loaded transcript afterwards. The global (run) governor is untouched.
@@ -357,10 +373,26 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 			return
 		}
 		log.Debug("iteration", "n", iter+1, "max", maxIter)
+		tools := a.registry.Definitions(a.cfg.Capabilities)
+		messages, contextStats := a.requestMessages(tools)
+		if contextStats.OverBudget {
+			// Safe to abandon the turn here: this is the top of the loop, so
+			// every tool call the model made has already been answered and the
+			// history it leaves behind is one a later turn can still send.
+			log.Error("conversation exceeds the context budget with nothing left to drop",
+				"tokens", contextStats.AfterTokens,
+				"fixed_tokens", contextStats.FixedTokens,
+				"budget", a.cfg.Options.MaxContextTokens,
+			)
+			a.events <- ErrorMsg{Err: fmt.Sprintf(
+				"this turn no longer fits the %d-token context budget (the system prompt and tool definitions alone cost about %d) — /compact it, raise options.max_context_tokens, or start a new session",
+				a.cfg.Options.MaxContextTokens, a.calibratedTokens(contextStats.FixedTokens))}
+			return
+		}
 		req := &llm.ChatRequest{
 			Model:    a.cfg.Model,
-			Messages: a.snapshotMessages(),
-			Tools:    a.registry.Definitions(a.cfg.Capabilities),
+			Messages: messages,
+			Tools:    tools,
 		}
 
 		// Run one iteration's LLM call, retrying upstream "ghost"
@@ -394,11 +426,8 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 			a.gov.AddCost(resp.Usage.Cost)
 			a.globGov.AddCost(resp.Usage.Cost)
 		}
-		cwd := ""
-		if a.runner != nil {
-			cwd = a.runner.CWD()
-		}
-		a.events <- StatsUpdateMsg{Session: a.gov.Snapshot(), Global: a.globGov.Snapshot(), CWD: cwd}
+		a.calibrate(contextStats.AfterTokens, resp.Usage.InputTokens)
+		a.events <- a.statsUpdate(a.promptTokens(contextStats, resp.Usage.InputTokens))
 
 		// Persist the assistant message with the usage that produced it, so the
 		// session's cumulative cost can be restored on resume.

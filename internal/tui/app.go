@@ -125,6 +125,14 @@ type Model struct {
 	globalStats  governor.Stats // whole-run usage (accumulates across agent switches)
 	cwd          string
 
+	// contextTokens is what the last request cost against contextBudget. Shown
+	// in the sidebar so the operator sees the window filling in time to
+	// /compact rather than after the harness has started dropping history.
+	// contextWarned keeps the transcript warning to one per filling.
+	contextTokens int
+	contextBudget int
+	contextWarned bool
+
 	pendingApproval *agent.ApprovalRequest
 }
 
@@ -387,39 +395,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.userScrolled = false
 				m.appendLine(styleUser.Render("You: ") + text)
 				m.input.SetValue("")
-				// Start the "busy" indicator for the duration of the turn.
-				startsTurn := !m.busy
-				if startsTurn {
-					m.busy = true
-					m.busyFrame = 0
-					cmds = append(cmds, busyTick())
-				}
 				// The cmd goroutine runs alongside the bubbletea event loop,
 				// so capture only the pointer-stable fields it needs — never
 				// m itself, since that would pin the whole TUI model into a
 				// background goroutine.
 				ag := m.ag
-				turnCtx, cancelTurn := context.WithCancel(m.ctx)
-				if startsTurn {
-					// A send on top of a running turn is refused by the agent,
-					// so esc has to keep pointing at the turn that is actually
-					// running rather than at the refused call.
-					m.cancelTurn = cancelTurn
-				}
-				sendCmd := func() tea.Msg {
-					defer cancelTurn()
+				cmds = append(cmds, m.startTurn(func(turnCtx context.Context) {
 					ag.Send(turnCtx, text)
-					return nil // events arrive via the event channel
-				}
-				// Do NOT also queue a waitForEvent here. The consumer chain
-				// started in Init() is already keeping exactly one reader
-				// blocked on a.events at all times: each event handler in
-				// Update returns the next waitForEvent. Adding a second
-				// reader would race the existing one — two goroutines
-				// blocked on `<-ch` deliver their captured events to
-				// bubbletea in goroutine-completion order, not channel
-				// arrival order, and streamed text chunks render scrambled.
-				cmds = append(cmds, sendCmd)
+				}))
 			}
 		default:
 			var cmd tea.Cmd
@@ -484,6 +467,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessionStats = msg.Session
 		m.globalStats = msg.Global
 		m.cwd = msg.CWD
+		m.noteContextFill(msg.ContextTokens, msg.ContextBudget)
+		cmds = append(cmds, waitForEvent(m.ag.Events()))
+
+	case agent.HistoryTrimmedMsg:
+		// Stays in the scrollback rather than in a toast: it explains gaps in
+		// what the model remembers minutes after it scrolls past.
+		m.appendLine(styleMuted.Render(renderHistoryTrimmed(msg)))
 		cmds = append(cmds, waitForEvent(m.ag.Events()))
 
 	case agent.ApprovalRequestMsg:
@@ -683,10 +673,41 @@ func (m *Model) resetChat() {
 // mutating the conversation while the agent is mid-turn.
 func (m *Model) refuseIfBusy(cmd string) bool {
 	if m.busy {
-		m.appendLine(styleErr.Render(cmd + ": agent is busy — wait for the current turn to finish"))
+		m.appendLine(styleErr.Render(cmd + ": agent is busy — wait for the current turn to finish, or press esc to stop it"))
 		return true
 	}
 	return false
+}
+
+// startTurn runs work that talks to the model on a command goroutine, wiring
+// the busy indicator and the stop key to it. A user message and /compact both
+// go through here: they differ in what they ask the model, not in how the UI
+// has to behave while they wait for it.
+//
+// Do NOT queue a waitForEvent alongside the returned command. The consumer
+// chain started in Init() already keeps exactly one reader blocked on the event
+// channel at all times, each handler in Update returning the next waitForEvent.
+// A second reader would race it: two goroutines blocked on the same channel
+// hand their events to bubbletea in goroutine-completion order rather than
+// arrival order, and streamed text renders scrambled.
+func (m *Model) startTurn(run func(context.Context)) tea.Cmd {
+	var cmds []tea.Cmd
+	turnCtx, cancelTurn := context.WithCancel(m.ctx)
+	if !m.busy {
+		m.busy = true
+		m.busyFrame = 0
+		// Work refused for landing on top of a running turn must not take the
+		// stop key with it: esc has to keep pointing at the turn that is
+		// actually running.
+		m.cancelTurn = cancelTurn
+		cmds = append(cmds, busyTick())
+	}
+	cmds = append(cmds, func() tea.Msg {
+		defer cancelTurn()
+		run(turnCtx)
+		return nil // events arrive via the event channel
+	})
+	return tea.Batch(cmds...)
 }
 
 // requireAgent reports whether an agent is selected and, if not, prints a
@@ -827,6 +848,18 @@ func (m *Model) renderSidebar() string {
 	} else {
 		fmt.Fprintln(&b, styleMuted.Render("$ N/A"))
 	}
+	if m.contextBudget > 0 && m.contextTokens > 0 {
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, styleHeader.Render("Context"))
+		percent := m.contextTokens * 100 / m.contextBudget
+		line := fmt.Sprintf("%s / %s  %d%%",
+			humanTokens(m.contextTokens), humanTokens(m.contextBudget), percent)
+		if percent >= contextWarnPercent {
+			fmt.Fprintln(&b, styleAccent(line))
+		} else {
+			fmt.Fprintln(&b, line)
+		}
+	}
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, styleHeader.Render("Run total"))
 	fmt.Fprintf(&b, "tok: %d\n", m.globalStats.TotalTokens)
@@ -867,6 +900,66 @@ func (m *Model) renderApproval() string {
 		r.Args,
 		styleMuted.Render("[y] approve   [n] deny   [q/esc] cancel turn"),
 	)
+}
+
+// contextWarnPercent is the fill level at which the context stops being
+// background information — far enough ahead of the ceiling that /compact is
+// still a choice rather than a rescue.
+const contextWarnPercent = 85
+
+// noteContextFill records what the last request cost and, the first time it
+// crosses the warning mark, says so in the conversation. The sidebar figure is
+// there to be watched; this is for the operator who is reading the transcript
+// rather than the gauge, and who otherwise meets the ceiling as a failed turn.
+//
+// It arms again once the fill drops back, so the warning follows a /compact or
+// a window advance that fills up again instead of being spent once a session.
+func (m *Model) noteContextFill(tokens, budget int) {
+	m.contextTokens = tokens
+	m.contextBudget = budget
+	if budget <= 0 || tokens <= 0 {
+		return
+	}
+	percent := tokens * 100 / budget
+	if percent < contextWarnPercent {
+		m.contextWarned = false
+		return
+	}
+	if m.contextWarned {
+		return
+	}
+	m.contextWarned = true
+	m.appendLine(styleWarn.Render(fmt.Sprintf(
+		"⚠ context %d%% full (%s of %s tokens) — /compact to keep the earlier conversation as a summary before it is dropped",
+		percent, humanTokens(tokens), humanTokens(budget))))
+}
+
+// renderHistoryTrimmed describes what left the conversation, in the terms that
+// matter to the operator: how much they lost, and whether they can get the gist
+// of it back.
+func renderHistoryTrimmed(msg agent.HistoryTrimmedMsg) string {
+	if msg.Summarised {
+		return fmt.Sprintf("⋯ compacted %d earlier messages into a summary (%s → %s tokens)",
+			msg.DroppedMessages, humanTokens(msg.BeforeTokens), humanTokens(msg.AfterTokens))
+	}
+
+	var did []string
+	if msg.DroppedMessages > 0 {
+		did = append(did, fmt.Sprintf("dropped %d earlier messages", msg.DroppedMessages))
+	}
+	if msg.ShrunkResults > 0 {
+		did = append(did, fmt.Sprintf("shortened %d tool results", msg.ShrunkResults))
+	}
+	return fmt.Sprintf("⋯ %s to stay within the context budget (%s → %s tokens)",
+		strings.Join(did, " and "), humanTokens(msg.BeforeTokens), humanTokens(msg.AfterTokens))
+}
+
+// humanTokens renders a token count for a sidebar column 26 characters wide.
+func humanTokens(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return fmt.Sprintf("%.0fk", float64(n)/1000)
 }
 
 func styleAccent(s string) string {

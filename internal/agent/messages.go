@@ -39,11 +39,26 @@ type TimeoutMsg struct {
 }
 
 // StatsUpdateMsg refreshes the sidebar's token/cost totals: Session is the
-// current session's usage, Global is the whole run's usage.
+// current session's usage, Global is the whole run's usage. ContextTokens is
+// what the last request cost against ContextBudget, so the operator can see the
+// window filling before it starts dropping.
 type StatsUpdateMsg struct {
-	Session governor.Stats
-	Global  governor.Stats
-	CWD     string
+	Session       governor.Stats
+	Global        governor.Stats
+	CWD           string
+	ContextTokens int
+	ContextBudget int
+}
+
+// HistoryTrimmedMsg reports that part of the conversation stopped being sent to
+// the model. Summarised distinguishes an operator-invoked /compact, whose gist
+// survives, from the automatic window, whose contents are simply gone.
+type HistoryTrimmedMsg struct {
+	DroppedMessages int
+	ShrunkResults   int
+	BeforeTokens    int
+	AfterTokens     int
+	Summarised      bool
 }
 
 // ApprovalRequestMsg asks the operator to permit a restricted tool call.

@@ -9,6 +9,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -278,6 +279,26 @@ func init() {
 			}
 			m.appendLine(styleMuted.Render(msg))
 			return nil
+		},
+	})
+	registerCommand(&Command{
+		Name:        "compact",
+		Description: "Replace the earlier conversation with a summary; /compact <focus> steers it.",
+		Handler: func(m *Model, args string) tea.Cmd {
+			if !m.requireAgent("compact") {
+				return nil
+			}
+			// Summarising rewrites the conversation a running turn is reading
+			// from, so it waits for one. The automatic context window is what
+			// covers a turn that grows too large while it runs.
+			if m.refuseIfBusy("compact") {
+				return nil
+			}
+			ag := m.ag
+			instructions := strings.TrimSpace(args)
+			return m.startTurn(func(turnCtx context.Context) {
+				ag.Compact(turnCtx, instructions)
+			})
 		},
 	})
 	registerCommand(&Command{

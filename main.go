@@ -239,6 +239,7 @@ func buildAgentRuntime(ctx context.Context, agentDir, resumeID string, newSessio
 		"sessions_dir", cfg.SessionsDir,
 		"max_iter", cfg.Options.MaxToolIterations,
 		"cmd_timeout_sec", cfg.Options.CommandTimeout,
+		"max_context_tokens", cfg.Options.MaxContextTokens,
 	)
 
 	// 1. Bring up the runtime sandbox only when the agent declares runtime tools.

@@ -1,6 +1,11 @@
 package tui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/ruvolof/aibitat-harness-go/internal/agent"
+)
 
 func TestLookupCommand(t *testing.T) {
 	tests := []struct {
@@ -64,5 +69,35 @@ func TestSortedCommandsDedupAliases(t *testing.T) {
 		if cmds[i-1].Name > cmds[i].Name {
 			t.Errorf("sortedCommands not sorted: %q before %q", cmds[i-1].Name, cmds[i].Name)
 		}
+	}
+}
+
+// Compaction rewrites the conversation a running turn is reading, so it has to
+// wait for one — and say how to stop the turn if the operator does not want to.
+func TestCompactRefusesWhileATurnIsRunning(t *testing.T) {
+	command, ok := lookupCommand("compact")
+	if !ok {
+		t.Fatal("/compact is not registered")
+	}
+	model := &Model{busy: true, ag: &agent.Agent{}}
+
+	if cmd := command.Handler(model, ""); cmd != nil {
+		t.Error("/compact started a summarising call on top of a running turn")
+	}
+	notice := model.chatBuf.String()
+	if !strings.Contains(notice, "busy") || !strings.Contains(notice, "esc") {
+		t.Errorf("notice = %q, want it to say the agent is busy and how to stop it", stripANSI(notice))
+	}
+}
+
+func TestCompactRefusesWithoutAnAgent(t *testing.T) {
+	command, _ := lookupCommand("compact")
+	model := &Model{}
+
+	if cmd := command.Handler(model, ""); cmd != nil {
+		t.Error("/compact ran with no agent selected")
+	}
+	if !strings.Contains(stripANSI(model.chatBuf.String()), "no agent selected") {
+		t.Errorf("notice = %q, want it to point at the agent picker", stripANSI(model.chatBuf.String()))
 	}
 }

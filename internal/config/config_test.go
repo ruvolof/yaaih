@@ -233,3 +233,27 @@ func TestAbsoluteOverrideUnchanged(t *testing.T) {
 		t.Errorf("SkillsDir = %q, want absolute override %q unchanged", cfg.SkillsDir, abs)
 	}
 }
+
+// The context budget applies to agents that never mention it — an agent.md
+// written before the option existed has to be windowed too, or the failure it
+// prevents is still one turn away.
+func TestContextBudgetAppliesByDefault(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(writeAgent(t, dir, ""), Overrides{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Options.MaxContextTokens != defaultMaxContextTokens {
+		t.Errorf("MaxContextTokens = %d, want the default %d",
+			cfg.Options.MaxContextTokens, defaultMaxContextTokens)
+	}
+
+	explicit, err := Load(writeAgent(t, t.TempDir(), "options:\n  max_context_tokens: -1"), Overrides{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if explicit.Options.MaxContextTokens != -1 {
+		t.Errorf("MaxContextTokens = %d, want the agent's own -1 (windowing off)",
+			explicit.Options.MaxContextTokens)
+	}
+}
