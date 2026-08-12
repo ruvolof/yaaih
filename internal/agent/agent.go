@@ -33,15 +33,16 @@ var log = logging.For("agent")
 // these by type-switching.
 type Event interface{ isAgentEvent() }
 
-func (AssistantDeltaMsg) isAgentEvent()  {}
-func (AssistantDoneMsg) isAgentEvent()   {}
-func (ToolCallStartMsg) isAgentEvent()   {}
-func (ToolCallResultMsg) isAgentEvent()  {}
-func (TimeoutMsg) isAgentEvent()         {}
-func (StatsUpdateMsg) isAgentEvent()     {}
-func (ApprovalRequestMsg) isAgentEvent() {}
-func (HistoryTrimmedMsg) isAgentEvent()  {}
-func (ErrorMsg) isAgentEvent()           {}
+func (AssistantDeltaMsg) isAgentEvent()   {}
+func (AssistantMessageMsg) isAgentEvent() {}
+func (AssistantDoneMsg) isAgentEvent()    {}
+func (ToolCallStartMsg) isAgentEvent()    {}
+func (ToolCallResultMsg) isAgentEvent()   {}
+func (TimeoutMsg) isAgentEvent()          {}
+func (StatsUpdateMsg) isAgentEvent()      {}
+func (ApprovalRequestMsg) isAgentEvent()  {}
+func (HistoryTrimmedMsg) isAgentEvent()   {}
+func (ErrorMsg) isAgentEvent()            {}
 
 // Agent owns the conversation state.
 type Agent struct {
@@ -441,6 +442,8 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 			Cost:          resp.Usage.Cost,
 			CostAvailable: resp.Usage.CostAvailable,
 		})
+
+		a.events <- AssistantMessageMsg{}
 
 		// If there are no tool calls, the turn is over.
 		if len(resp.ToolCalls) == 0 {

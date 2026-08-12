@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -58,5 +59,49 @@ func TestContextWarningStaysQuietWithoutABudget(t *testing.T) {
 	}
 	if strings.Contains(m.renderSidebar(), "Context") {
 		t.Error("the sidebar shows a context gauge with no budget to measure against")
+	}
+}
+
+// Streamed text lives below the committed transcript until something commits
+// it. Across a tool call that means narration sinking under the tool traffic it
+// introduced, and staying pinned to the bottom of the view for the rest of the
+// turn.
+func TestNarrationIsCommittedAboveTheToolCallItIntroduced(t *testing.T) {
+	m := &Model{}
+
+	m.pendingAs.WriteString("Let me list the workspace.")
+	m.commitAssistant()
+	m.appendLine(styleTool.Render("→ shell_exec {\"command\":\"ls\"}"))
+	m.appendLine(styleToolRes.Render("  ✓ agents"))
+	m.pendingAs.WriteString("There are three agents.")
+	m.commitAssistant()
+
+	transcript := strings.Split(stripANSI(m.chatBuf.String()), "\n")
+	want := []string{
+		"Let me list the workspace.",
+		"→ shell_exec {\"command\":\"ls\"}",
+		"  ✓ agents",
+		"There are three agents.",
+	}
+	if !slices.Equal(transcript, want) {
+		t.Errorf("transcript =\n%q\nwant\n%q", transcript, want)
+	}
+	if m.pendingAs.Len() != 0 {
+		t.Errorf("pendingAs still holds %q after committing", m.pendingAs.String())
+	}
+	if m.lastAssistant != "There are three agents." {
+		t.Errorf("lastAssistant = %q, want the most recent message", m.lastAssistant)
+	}
+}
+
+// Committing nothing must not push a blank line into the transcript: the turn's
+// last message is normally committed before AssistantDoneMsg reaches the model.
+func TestCommittingAnEmptyReplyChangesNothing(t *testing.T) {
+	m := &Model{}
+	m.appendLine("only line")
+	m.commitAssistant()
+
+	if body := stripANSI(m.chatBuf.String()); body != "only line" {
+		t.Errorf("transcript = %q, want it untouched", body)
 	}
 }

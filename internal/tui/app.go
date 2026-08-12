@@ -84,9 +84,9 @@ type Model struct {
 
 	// renderPending / renderTicking coalesce bursts of AssistantDeltaMsg into
 	// one repaint every renderTickInterval instead of one per chunk. Cleared
-	// when a tick fires or when AssistantDoneMsg forces a final flush.
-	renderPending  bool
-	renderTicking  bool
+	// when a tick fires or when commitAssistant forces a final flush.
+	renderPending bool
+	renderTicking bool
 
 	// userScrolled tracks whether the user has manually scrolled the chat
 	// viewport away from the bottom. When true, new content (streaming
@@ -110,8 +110,8 @@ type Model struct {
 	cancelTurn context.CancelFunc
 
 	// lastAssistant holds the plain-text version of the most recent completed
-	// assistant turn so ctrl+y can copy it without depending on chatBuf's
-	// styling. Updated in the AssistantDoneMsg handler.
+	// assistant message so ctrl+y can copy it without depending on chatBuf's
+	// styling. Updated in commitAssistant.
 	lastAssistant string
 
 	// toast is a short status hint shown in the sidebar (e.g. "copied 412
@@ -419,18 +419,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, waitForEvent(m.ag.Events()))
 
+	case agent.AssistantMessageMsg:
+		m.commitAssistant()
+		cmds = append(cmds, waitForEvent(m.ag.Events()))
+
 	case agent.AssistantDoneMsg:
-		if m.pendingAs.Len() > 0 {
-			// Render and clear pendingAs BEFORE appendLine — appendLine calls
-			// renderChat synchronously, and renderChat re-adds pendingAs on
-			// top of chatBuf. Without the reset-first, the reply shows twice
-			// until the next event triggers another render.
-			plain := m.pendingAs.String()
-			rendered := styleAssist.Render(plain)
-			m.pendingAs.Reset()
-			m.lastAssistant = plain
-			m.appendLine(rendered)
-		}
+		// A turn that ran to completion has already committed its last message
+		// via AssistantMessageMsg; this catches the paths that end without one
+		// — a cancelled turn holding a half-streamed reply, and /compact.
+		m.commitAssistant()
 		if msg.Cancelled {
 			// Goes after the partial reply so the transcript reads in the
 			// order it happened, and stays in the scrollback so a reply that
@@ -438,10 +435,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLine(styleMuted.Render("⨯ turn cancelled"))
 			cmds = append(cmds, m.setToast("turn cancelled"))
 		}
-		// appendLine above already flushed. Clear the coalescing flag so any
-		// still-scheduled renderTickMsg becomes a no-op instead of doing a
-		// second identical repaint.
-		m.renderPending = false
 		m.busy = false
 		m.cancelTurn = nil
 		cmds = append(cmds, waitForEvent(m.ag.Events()))
@@ -748,6 +741,29 @@ func (m *Model) renderAgentsList() string {
 func (m *Model) showAgentPicker() {
 	m.appendLine(styleMuted.Render("No agent selected."))
 	m.appendLine(m.renderAgentsList())
+}
+
+// commitAssistant moves the reply streamed so far out of the pending buffer and
+// into the transcript. Until it runs, renderChat draws that text below every
+// committed line, so a reply left pending across a tool call would sit under
+// the tool traffic it introduced and slide further down with each one.
+func (m *Model) commitAssistant() {
+	if m.pendingAs.Len() == 0 {
+		return
+	}
+	// Render and clear pendingAs BEFORE appendLine — appendLine calls
+	// renderChat synchronously, and renderChat re-adds pendingAs on top of
+	// chatBuf. Without the reset-first, the reply shows twice until the next
+	// event triggers another render.
+	plain := m.pendingAs.String()
+	rendered := styleAssist.Render(plain)
+	m.pendingAs.Reset()
+	m.lastAssistant = plain
+	m.appendLine(rendered)
+	// appendLine already flushed. Clear the coalescing flag so any
+	// still-scheduled renderTickMsg becomes a no-op instead of doing a second
+	// identical repaint.
+	m.renderPending = false
 }
 
 func (m *Model) appendLine(s string) {

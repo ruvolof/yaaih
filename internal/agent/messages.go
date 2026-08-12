@@ -12,6 +12,13 @@ type AssistantDeltaMsg struct {
 	Text string
 }
 
+// AssistantMessageMsg fires when the model has finished one assistant message.
+// A turn is a sequence of these: every message but the last carries tool calls
+// and is followed by the loop running them. It marks the point where the text
+// streamed so far belongs in the transcript — before the tool calls that text
+// introduces, rather than after everything the turn goes on to do.
+type AssistantMessageMsg struct{}
+
 // AssistantDoneMsg fires when the model has finished a turn (any tool calls
 // will have already been executed and folded back in). Cancelled distinguishes
 // a turn the operator stopped from one the model ended on its own.

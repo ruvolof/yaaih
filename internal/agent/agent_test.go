@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -319,5 +320,38 @@ func TestSendRefusesUnregisteredTool(t *testing.T) {
 	}
 	if errs := errorMessages(events); len(errs) != 0 {
 		t.Errorf("turn reported errors %v, want the model to recover on its own", errs)
+	}
+}
+
+// A model that narrates before it acts ("let me check X") ends its message with
+// the tool calls that text introduces. The message has to be announced there,
+// between the two, or the TUI has nothing to hang the text on until the whole
+// turn — every iteration of it — is over.
+func TestAssistantMessageIsAnnouncedBeforeItsToolCalls(t *testing.T) {
+	provider := &stubProvider{responses: []*llm.ChatResponse{
+		{
+			Content:   "Let me list the workspace.",
+			ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "shell_exec", Arguments: `{"command":"ls"}`}},
+			Usage:     llm.TokenUsage{InputTokens: 10, OutputTokens: 5},
+		},
+		textResponse("here is the listing"),
+	}}
+	agent := newTestAgent(t, []string{"shell"}, provider, &stubRunner{})
+
+	var order []string
+	for _, ev := range runTurn(t, agent, "list the workspace") {
+		switch ev.(type) {
+		case AssistantMessageMsg:
+			order = append(order, "message")
+		case ToolCallStartMsg:
+			order = append(order, "tool")
+		case AssistantDoneMsg:
+			order = append(order, "done")
+		}
+	}
+
+	want := []string{"message", "tool", "message", "done"}
+	if !slices.Equal(order, want) {
+		t.Errorf("event order = %v, want %v", order, want)
 	}
 }
