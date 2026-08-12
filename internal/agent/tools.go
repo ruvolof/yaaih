@@ -190,8 +190,10 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 	register(br != nil, &Tool{
 		Capability: "browser",
 		Def: llm.ToolDefinition{
-			Name:        "browser_navigate",
-			Description: "Navigate the headless browser to a URL.",
+			Name: "browser_navigate",
+			Description: "Navigate the headless browser to a URL. Returns as soon as the HTML is parsed, " +
+				"so content rendered by page scripts may not be there yet — follow with browser_wait_for " +
+				"when you need a specific element.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -211,6 +213,44 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 				return "", err
 			}
 			return "OK: navigated to " + p.URL, nil
+		},
+	})
+
+	register(br != nil, &Tool{
+		Capability: "browser",
+		Def: llm.ToolDefinition{
+			Name: "browser_wait_for",
+			Description: "Wait for the element matched by CSS selector to reach a state. " +
+				"Use after browser_navigate on script-rendered pages, or to wait for a spinner to go away.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"selector": map[string]any{"type": "string"},
+					"state": map[string]any{
+						"type":        "string",
+						"enum":        []string{"visible", "hidden", "attached", "detached"},
+						"description": "Defaults to visible.",
+					},
+				},
+				"required": []string{"selector"},
+			},
+		},
+		Fn: func(ctx context.Context, args string) (string, error) {
+			var p struct {
+				Selector string `json:"selector"`
+				State    string `json:"state"`
+			}
+			if err := json.Unmarshal([]byte(args), &p); err != nil {
+				return "", err
+			}
+			if err := br.WaitFor(ctx, p.Selector, p.State); err != nil {
+				return "", err
+			}
+			state := p.State
+			if state == "" {
+				state = "visible"
+			}
+			return "OK: " + p.Selector + " is " + state, nil
 		},
 	})
 

@@ -181,6 +181,8 @@ runtime:
 - `options.max_tool_result_bytes`: bytes of tool output kept in the conversation (default 32768)
 - `options.max_file_read_lines`: default page size for `file_read` (default 500)
 - `options.max_context_tokens`: ceiling on one request's prompt (default 64000)
+- `options.browser_timeout`: seconds a single browser operation may take (default 30)
+- `options.browser_user_agent`: overrides the User-Agent the sandboxed browser sends
 
 ### Example agent
 
@@ -207,6 +209,7 @@ options:
   max_tool_result_bytes: 32768
   max_file_read_lines: 500
   max_context_tokens: 64000
+  browser_timeout: 30
 ---
 
 Your Markdown system prompt goes here.
@@ -234,6 +237,8 @@ From `internal/config/config.go`:
 - `options.max_tool_result_bytes` (int)
 - `options.max_file_read_lines` (int)
 - `options.max_context_tokens` (int)
+- `options.browser_timeout` (int)
+- `options.browser_user_agent` (string)
 
 ### Tool output size
 
@@ -253,6 +258,29 @@ the agent can `grep` it (with `shell_exec`) or page through it (with
 naming the range and the file's total line count, so reading part of a large file
 is the normal path rather than a workaround.
 
+### Browser
+
+`browser_navigate` returns once the HTML is parsed. It does not wait for the
+network to go quiet: analytics beacons, websockets, and long-polling keep a
+request in flight for as long as a page is open, so waiting for idle turns an
+ordinary page load into a timeout that looks like a blocked request. The
+trade-off is that content a page renders from script may not be there yet —
+`browser_wait_for` waits for a named selector to become `visible`, `hidden`,
+`attached`, or `detached`, which is also how you wait out a spinner.
+
+Every browser operation is bounded by `options.browser_timeout` (default 30s),
+including clicks and typing, which would otherwise sit on playwright's own 30s
+default regardless of what you configured.
+
+The sandboxed Chromium presents itself as ordinary desktop Chrome: a real
+desktop User-Agent derived from its own version rather than the default
+`HeadlessChrome`, a 1920x1080 window, `en-US`, and none of the automation
+markers a routine fingerprinting script reads. Without this most commercial bot
+filters serve a challenge page instead of content, and the 800x600 headless
+default gets you mobile layouts. Set `options.browser_user_agent` to override the
+string. This is enough for naive fingerprinting and is not intended to go
+further — there is no CAPTCHA solving here.
+
 ### Context window
 
 The whole conversation is re-sent on every request, so a long session eventually
@@ -268,16 +296,31 @@ it can no longer see. Two things are never dropped: the system prompt, and the
 turn in flight — the question being answered and every result it has produced —
 so a conversation that crosses the ceiling mid-turn keeps going rather than
 breaking. When one turn is too large to fit even on its own, its oldest tool
-results are shortened to their head and tail instead.
+results are shortened instead, first to their head and tail and then to nothing
+but a note that the tool ran; the call itself always survives, so the model can
+see what it has already done.
 
 This bounds what is *sent*. The session file keeps everything, so a resumed
 transcript still shows the whole conversation. The sidebar's `Context` figure is
-what the last request cost against the ceiling.
+what the last request cost against the ceiling, and once it passes 85% the
+conversation gets a one-off warning naming `/compact`, so the ceiling is not
+first met as a failed turn.
+
+A budget has a floor. The system prompt and the tool definitions go out on every
+request and cannot be windowed away, so a ceiling close to that floor leaves
+nothing for the conversation — for the shipped `devops` agent the floor is
+several hundred tokens, and a ceiling of a couple of thousand will keep hitting
+it. A turn that cannot be made to fit ends with an error naming both numbers
+rather than paying for a request the provider would reject, and the turn after
+it succeeds, because by then the failed turn is old enough to be windowed away.
 
 Trimming is lossy: the model genuinely stops being able to see what left the
-window. `/compact` replaces the older part of the conversation with a summary of
-it, which keeps the gist at the cost of one extra model call, and is recorded in
-the session file so a resumed session stays compacted.
+window. `/compact` replaces the earlier conversation with a summary of it, at
+the cost of one extra model call. It keeps the last turn verbatim; where the
+session *is* one long turn — one question and twenty tool calls, which is how a
+context usually fills — it keeps the last exchange instead, so compaction is
+available exactly when it is the way out. The swap is recorded in the session
+file, so a resumed session stays compacted.
 
 ## 6) Notes on the runtime container
 

@@ -110,6 +110,16 @@ type Options struct {
 	// being sent. Leave headroom below the model's real context window for the
 	// reply. Zero or less sends the whole conversation however large it grows.
 	MaxContextTokens int `yaml:"max_context_tokens"`
+
+	// BrowserUserAgent overrides the User-Agent string the sandboxed Chromium
+	// advertises. Left empty, one is derived from the browser's own version so
+	// the two cannot disagree.
+	BrowserUserAgent string `yaml:"browser_user_agent"`
+
+	// BrowserTimeout caps navigation, clicks, typing, and waits in the browser
+	// tools. It bounds a single browser operation, not a whole turn, so it is
+	// shorter than CommandTimeout.
+	BrowserTimeout int `yaml:"browser_timeout"` // seconds
 }
 
 // Defaults applied after parsing if the agent.md leaves fields blank.
@@ -121,6 +131,11 @@ const (
 	defaultSessionsDir   = "sessions"
 	defaultMaxIterations = 25
 	defaultCmdTimeoutSec = 120
+
+	// Long enough for a slow page to reach DOMContentLoaded on a bad
+	// connection, short enough that a selector that will never match gives the
+	// turn back instead of stalling it.
+	defaultBrowserTimeoutSec = 30
 
 	// 32 KiB is roughly 8k tokens: enough for a stack trace, a test run, or a
 	// directory listing to arrive whole, small enough that a handful of them do
@@ -325,6 +340,9 @@ func applyDefaults(c *Config) {
 	}
 	if c.Options.MaxContextTokens == 0 {
 		c.Options.MaxContextTokens = defaultMaxContextTokens
+	}
+	if c.Options.BrowserTimeout == 0 {
+		c.Options.BrowserTimeout = defaultBrowserTimeoutSec
 	}
 }
 

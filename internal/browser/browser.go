@@ -52,6 +52,12 @@ type Options struct {
 	// SupportsVision flips Screenshot from "return image path" to "also return
 	// a text fallback the model can consume".
 	SupportsVision bool
+	// UserAgent overrides the User-Agent Chromium advertises. Empty derives one
+	// from the version of the Chromium in the container.
+	UserAgent string
+	// Timeout bounds navigation and element operations. Zero leaves
+	// playwright's own 30 s default in place.
+	Timeout time.Duration
 }
 
 // Browser is a lazily-initialised handle.
@@ -68,6 +74,59 @@ type Browser struct {
 
 // New returns an unstarted Browser. The first operation triggers initialisation.
 func New(opts Options) *Browser { return &Browser{opts: opts} }
+
+// automationHidingScript runs before any page script and clears the handful of
+// globals that mark a CDP-driven browser as automated. It is deliberately
+// short: the goal is to stop a routine fingerprinting check from serving a
+// challenge page to an agent browsing on its operator's behalf, not to defeat
+// dedicated anti-bot systems. A sprawling stealth bundle is itself detectable
+// and is not worth maintaining here.
+const automationHidingScript = `
+delete Object.getPrototypeOf(navigator).webdriver;
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+window.chrome = window.chrome || { runtime: {} };
+`
+
+// fallbackChromiumMajor stands in when the version probe fails. A UA claiming a
+// version the engine does not have is itself a fingerprint, so this is a last
+// resort rather than the normal path.
+const fallbackChromiumMajor = "140"
+
+// desktopUserAgent builds the UA string for a Chromium of the given major
+// version on desktop Linux.
+func desktopUserAgent(major string) string {
+	if major == "" {
+		major = fallbackChromiumMajor
+	}
+	return fmt.Sprintf("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "+
+		"Chrome/%s.0.0.0 Safari/537.36", major)
+}
+
+// chromiumMajorVersion asks the container's Chromium what it is, so the UA the
+// harness advertises tracks the engine actually running rather than drifting
+// away from it on every image rebuild. Returns "" when the probe fails.
+func (b *Browser) chromiumMajorVersion(ctx context.Context, chromePath string) string {
+	banner := b.execCapture(ctx, fmt.Sprintf("%q --version 2>/dev/null", chromePath))
+	major := parseChromiumMajor(banner)
+	if major == "" {
+		log.Warn("chromium version probe failed; falling back to a fixed user agent", "output", banner)
+	}
+	return major
+}
+
+// parseChromiumMajor pulls the major version out of a --version banner
+// ("Chromium 141.0.7390.54"). Returns "" for anything it does not recognise.
+func parseChromiumMajor(banner string) string {
+	fields := strings.Fields(banner)
+	if len(fields) == 0 {
+		return ""
+	}
+	major, _, _ := strings.Cut(fields[len(fields)-1], ".")
+	if major == "" || strings.TrimLeft(major, "0123456789") != "" {
+		return ""
+	}
+	return major
+}
 
 // init lazily launches Chromium inside the container and connects via CDP.
 // Safe to call multiple times — only the first call does work.
@@ -96,6 +155,12 @@ func (b *Browser) init(ctx context.Context) error {
 	}
 	log.Info("found chromium", "path", chromePath)
 
+	userAgent := b.opts.UserAgent
+	if userAgent == "" {
+		userAgent = desktopUserAgent(b.chromiumMajorVersion(ctx, chromePath))
+	}
+	log.Info("user agent", "value", userAgent, "overridden", b.opts.UserAgent != "")
+
 	// 2. Start headless Chromium on 127.0.0.1:9223 inside the container and
 	//    expose it via socat on 0.0.0.0:9222 so Docker's port mapping can
 	//    reach it.
@@ -110,14 +175,25 @@ func (b *Browser) init(ctx context.Context) error {
 	//    Notes on the script:
 	//      - '*' is single-quoted: the exec's WorkingDir is /workspace and
 	//        an unquoted * would be shell-globbed against its contents.
+	//      - the ';' in --accept-lang is single-quoted for the same reason it
+	//        would need to be at a prompt: bare, it ends the statement.
 	//      - statements are newline-separated; "; " after `&` is a shell
 	//        syntax error.
+	//
+	//    The presentation flags are not cosmetic. Without --user-agent the
+	//    UA still reads HeadlessChrome, which alone is enough for a commercial
+	//    bot filter to serve a challenge page instead of content; without a
+	//    window size the viewport is 800x600, which serves mobile layouts the
+	//    model then has to reason about.
 	startCmd := strings.Join([]string{
 		"set -e",
 		fmt.Sprintf(`nohup %q --headless=new --no-sandbox --disable-dev-shm-usage`+
 			` --remote-debugging-address=127.0.0.1 --remote-debugging-port=9223`+
 			` '--remote-allow-origins=*'`+
-			` about:blank >/tmp/chromium.log 2>&1 &`, chromePath),
+			` --disable-blink-features=AutomationControlled`+
+			` --window-size=1920,1080 --lang=en-US '--accept-lang=en-US,en;q=0.9'`+
+			` --user-agent=%q`+
+			` about:blank >/tmp/chromium.log 2>&1 &`, chromePath, userAgent),
 		`nohup socat TCP-LISTEN:9222,bind=0.0.0.0,fork,reuseaddr TCP:127.0.0.1:9223 >/tmp/socat.log 2>&1 &`,
 		"sleep 0.5",
 	}, "\n")
@@ -189,6 +265,15 @@ func (b *Browser) init(ctx context.Context) error {
 			return fmt.Errorf("browser: new context: %w", err)
 		}
 	}
+	if b.opts.Timeout > 0 {
+		ms := float64(b.opts.Timeout.Milliseconds())
+		bctx.SetDefaultTimeout(ms)
+		bctx.SetDefaultNavigationTimeout(ms)
+	}
+	if err := bctx.AddInitScript(playwright.Script{Content: playwright.String(automationHidingScript)}); err != nil {
+		log.Warn("add init script failed; automation markers remain visible to the page", "err", err)
+	}
+
 	pages := bctx.Pages()
 	var page playwright.Page
 	if len(pages) > 0 {
@@ -217,7 +302,13 @@ func (b *Browser) init(ctx context.Context) error {
 	return nil
 }
 
-// Navigate loads url and waits for network idle.
+// Navigate loads url and returns once the DOM is parsed.
+//
+// It deliberately does not wait for the network to fall idle: analytics
+// beacons, websockets, and long-polling keep a request in flight indefinitely
+// on most modern pages, so waiting for idle turns an ordinary page load into a
+// timeout that reads like a blocked request. Content that arrives after
+// DOMContentLoaded is the caller's business — see WaitFor.
 func (b *Browser) Navigate(ctx context.Context, url string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -227,7 +318,7 @@ func (b *Browser) Navigate(ctx context.Context, url string) error {
 	start := time.Now()
 	log.Info("navigate", "url", url)
 	_, err := b.page.Goto(url, playwright.PageGotoOptions{
-		WaitUntil: playwright.WaitUntilStateNetworkidle,
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
 	})
 	if err != nil {
 		log.Error("navigate failed", "url", url, "err", err, "elapsed_ms", time.Since(start).Milliseconds())
@@ -235,6 +326,49 @@ func (b *Browser) Navigate(ctx context.Context, url string) error {
 		log.Info("navigate done", "url", url, "elapsed_ms", time.Since(start).Milliseconds())
 	}
 	return err
+}
+
+// WaitFor blocks until the element matching selector reaches state, or the
+// browser timeout expires. An empty state waits for the element to become
+// visible.
+//
+// This is the deliberate half of navigation: Navigate returns as soon as the
+// DOM is parsed, so anything a script renders afterwards is waited for here, by
+// name, instead of being guessed at with a blanket network-idle wait.
+func (b *Browser) WaitFor(ctx context.Context, selector, state string) error {
+	waitState, err := waitForSelectorState(state)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.init(ctx); err != nil {
+		return err
+	}
+	start := time.Now()
+	_, err = b.page.WaitForSelector(selector, playwright.PageWaitForSelectorOptions{State: waitState})
+	log.Info("wait for selector",
+		"selector", selector,
+		"state", *waitState,
+		"err", err,
+		"elapsed_ms", time.Since(start).Milliseconds(),
+	)
+	return err
+}
+
+func waitForSelectorState(state string) (*playwright.WaitForSelectorState, error) {
+	switch state {
+	case "", "visible":
+		return playwright.WaitForSelectorStateVisible, nil
+	case "attached":
+		return playwright.WaitForSelectorStateAttached, nil
+	case "detached":
+		return playwright.WaitForSelectorStateDetached, nil
+	case "hidden":
+		return playwright.WaitForSelectorStateHidden, nil
+	default:
+		return nil, fmt.Errorf("browser: unknown wait state %q (want visible, hidden, attached, or detached)", state)
+	}
 }
 
 // Content returns the current page rendered as Markdown — stripped of script
