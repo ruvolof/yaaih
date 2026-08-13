@@ -257,8 +257,9 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 	register(br != nil, &Tool{
 		Capability: "browser",
 		Def: llm.ToolDefinition{
-			Name:        "browser_content",
-			Description: "Return the current page as Markdown (scripts/styles stripped).",
+			Name: "browser_content",
+			Description: "Return the current page as Markdown: title, URL, then the main content with " +
+				"navigation and footers dropped and link targets given as absolute URLs.",
 			Parameters:  emptyObjectSchema(),
 		},
 		Fn: func(ctx context.Context, args string) (string, error) {

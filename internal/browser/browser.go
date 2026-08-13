@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -371,54 +372,177 @@ func waitForSelectorState(state string) (*playwright.WaitForSelectorState, error
 	}
 }
 
-// Content returns the current page rendered as Markdown — stripped of script
-// and style tags, with headings, paragraphs, and links preserved.
+// Content returns the current page rendered as Markdown — boilerplate dropped,
+// with headings, lists, tables, code blocks, and links preserved.
 func (b *Browser) Content(ctx context.Context) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := b.init(ctx); err != nil {
 		return "", err
 	}
-	// Use a small in-page script that walks the DOM and produces a Markdown summary.
-	// This is intentionally simple: heuristics, not perfect reproduction.
-	js := `() => {
-        const drop = new Set(['SCRIPT','STYLE','NOSCRIPT','SVG','PATH','META','LINK']);
-        const out = [];
-        function walk(node) {
-            if (!node) return;
-            if (node.nodeType === Node.TEXT_NODE) {
-                const t = node.textContent.trim();
-                if (t) out.push(t);
-                return;
-            }
-            if (node.nodeType !== Node.ELEMENT_NODE) return;
-            if (drop.has(node.tagName)) return;
-            const tag = node.tagName;
-            if (/^H[1-6]$/.test(tag)) {
-                const n = parseInt(tag[1]);
-                out.push('\n' + '#'.repeat(n) + ' ' + (node.innerText || '').trim() + '\n');
-                return;
-            }
-            if (tag === 'A') {
-                const href = node.getAttribute('href') || '';
-                const text = (node.innerText || '').trim();
-                if (text) out.push('[' + text + '](' + href + ')');
-                return;
-            }
-            if (tag === 'LI') { out.push('\n- '); }
-            if (tag === 'P' || tag === 'DIV' || tag === 'BR') { out.push('\n'); }
-            for (const c of node.childNodes) walk(c);
-        }
-        walk(document.body);
-        return out.join(' ').replace(/[ \t]+/g, ' ').replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n');
-    }`
-	res, err := b.page.Evaluate(js)
+	return b.content()
+}
+
+// content is Content without the lock, for callers that already hold it.
+func (b *Browser) content() (string, error) {
+	res, err := b.page.Evaluate(strings.ReplaceAll(contentScript, "__MAX_CHARS__", strconv.Itoa(maxContentChars)))
 	if err != nil {
 		return "", err
 	}
-	s, _ := res.(string)
-	return s, nil
+	text, _ := res.(string)
+	return text, nil
 }
+
+// maxContentChars bounds what one extraction collects before it gives up on the
+// rest of the page.
+//
+// This is not the conversation budget — options.max_tool_result_bytes decides
+// how much of the result the model actually sees, and spills the remainder to
+// disk. This bound exists so that a pathological page cannot push megabytes of
+// DOM text across CDP and through the host just to be cut down afterwards.
+const maxContentChars = 200_000
+
+// contentScript walks the DOM and renders Markdown. __MAX_CHARS__ is
+// substituted before evaluation.
+//
+// The script is a Go raw string, which cannot contain a backtick, so the one
+// Markdown needs for code spans and fences is spelled with the JavaScript
+// escape \u0060 and assigned to TICK.
+//
+// Heuristics, not faithful reproduction. Two properties are worth preserving if
+// this is ever edited:
+//
+//   - Fragments are concatenated, never joined with a separator. Inline flow
+//     comes from the source's own whitespace, collapsed per text node, so
+//     punctuation stays attached to the word before it.
+//   - Structure is emitted as newlines through breakLine, which tops the buffer
+//     up to the requested depth rather than appending blindly, so nested block
+//     elements do not stack blank lines.
+const contentScript = `() => {
+    const MAX = __MAX_CHARS__;
+    const TICK = '\u0060';
+    const FENCE = TICK + TICK + TICK;
+
+    const dropped = new Set(['SCRIPT','STYLE','NOSCRIPT','SVG','PATH','META','LINK',
+        'TEMPLATE','IFRAME','CANVAS','AUDIO','VIDEO','NAV','FOOTER','ASIDE']);
+    const paragraphs = new Set(['P','BLOCKQUOTE','FIGURE','TABLE','UL','OL','DL','FORM','FIELDSET']);
+    const containers = new Set(['ADDRESS','ARTICLE','DD','DIV','DT','FIGCAPTION','HEADER','MAIN','SECTION']);
+
+    let buffer = '';
+    let truncated = false;
+
+    function emit(text) {
+        if (truncated || !text) return;
+        if (buffer.length + text.length > MAX) {
+            buffer += text.slice(0, MAX - buffer.length);
+            truncated = true;
+            return;
+        }
+        buffer += text;
+    }
+
+    function emitInline(raw) {
+        let text = raw.replace(/\s+/g, ' ');
+        if (!buffer || /\s$/.test(buffer)) text = text.replace(/^ /, '');
+        emit(text);
+    }
+
+    function breakLine(depth) {
+        if (!buffer) return;
+        let have = 0;
+        while (have < buffer.length && buffer[buffer.length - 1 - have] === '\n') have++;
+        for (; have < depth; have++) emit('\n');
+    }
+
+    function walkChildren(node) {
+        for (const child of node.childNodes) walk(child);
+    }
+
+    function linkTarget(node) {
+        const href = node.href || node.getAttribute('href') || '';
+        if (!href || href.length > 400 || href.startsWith('javascript:')) return '';
+        return href;
+    }
+
+    function walk(node) {
+        if (truncated) return;
+        if (node.nodeType === Node.TEXT_NODE) { emitInline(node.textContent); return; }
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+        const tag = node.tagName;
+        if (dropped.has(tag)) return;
+        if (node.hasAttribute('hidden') || node.getAttribute('aria-hidden') === 'true') return;
+
+        if (tag === 'BR') { breakLine(1); return; }
+        if (tag === 'HR') { breakLine(2); emit('---'); breakLine(2); return; }
+
+        if (tag === 'PRE') {
+            breakLine(2);
+            emit(FENCE + '\n' + node.textContent.replace(/\s+$/, '') + '\n' + FENCE);
+            breakLine(2);
+            return;
+        }
+        if (tag === 'CODE') {
+            const text = node.textContent.replace(/\s+/g, ' ').trim();
+            if (text) emit(TICK + text + TICK);
+            return;
+        }
+        if (/^H[1-6]$/.test(tag)) {
+            breakLine(2);
+            emit('#'.repeat(Number(tag[1])) + ' ');
+            walkChildren(node);
+            breakLine(2);
+            return;
+        }
+        if (tag === 'A') {
+            const text = node.textContent.replace(/\s+/g, ' ').trim();
+            if (!text) return;
+            const href = linkTarget(node);
+            emit(href ? '[' + text + '](' + href + ')' : text);
+            return;
+        }
+        if (tag === 'LI') {
+            breakLine(1);
+            const parent = node.parentElement;
+            const ordered = parent && parent.tagName === 'OL';
+            emit(ordered ? (Array.prototype.indexOf.call(parent.children, node) + 1) + '. ' : '- ');
+            walkChildren(node);
+            breakLine(1);
+            return;
+        }
+        if (tag === 'TR') { breakLine(1); walkChildren(node); breakLine(1); return; }
+        if (tag === 'TD' || tag === 'TH') {
+            if (buffer && !/\n$/.test(buffer)) emit(' | ');
+            walkChildren(node);
+            return;
+        }
+        if (paragraphs.has(tag)) { breakLine(2); walkChildren(node); breakLine(2); return; }
+        if (containers.has(tag)) { breakLine(1); walkChildren(node); breakLine(1); return; }
+
+        walkChildren(node);
+    }
+
+    function extract(root) {
+        buffer = '';
+        truncated = false;
+        walk(root);
+        return buffer.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    }
+
+    const body = document.body || document.documentElement;
+    // A main/article wrapper is the page telling us where its content is. Some
+    // are empty shells filled in later, so a suspiciously short result falls
+    // back to the whole body rather than reporting the page as blank.
+    const preferred = document.querySelector('main') || document.querySelector('article');
+    let text = preferred ? extract(preferred) : '';
+    if (text.length < 200) text = extract(body);
+    if (truncated) text += '\n\n[content truncated at ' + MAX + ' characters]';
+
+    const header = [];
+    if (document.title) header.push('# ' + document.title);
+    header.push('URL: ' + location.href);
+    return header.join('\n') + '\n\n' + text;
+}`
 
 // Screenshot saves a PNG of the current page to ScreenshotsDir and returns the
 // absolute host path. When SupportsVision is false, the second return value is
@@ -443,12 +567,11 @@ func (b *Browser) Screenshot(ctx context.Context) (path string, textFallback str
 		return full, "", nil
 	}
 	// Text fallback when the model can't process images.
-	// Reuse Content() but be careful: we already hold the lock; call the
-	// unlocked inner version.
-	js := `() => document.title + '\n\n' + document.body.innerText`
-	res, _ := b.page.Evaluate(js)
-	s, _ := res.(string)
-	return full, s, nil
+	text, err := b.content()
+	if err != nil {
+		log.Warn("screenshot text fallback failed", "err", err)
+	}
+	return full, text, nil
 }
 
 // Click clicks the element matching the given selector.
