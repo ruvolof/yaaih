@@ -219,6 +219,22 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 	register(br != nil, &Tool{
 		Capability: "browser",
 		Def: llm.ToolDefinition{
+			Name:        "browser_back",
+			Description: "Return the current tab to the previous page in its history.",
+			Parameters:  emptyObjectSchema(),
+		},
+		Fn: func(ctx context.Context, args string) (string, error) {
+			url, err := br.Back(ctx)
+			if err != nil {
+				return "", err
+			}
+			return "OK: back to " + url, nil
+		},
+	})
+
+	register(br != nil, &Tool{
+		Capability: "browser",
+		Def: llm.ToolDefinition{
 			Name: "browser_wait_for",
 			Description: "Wait for the element matched by CSS selector to reach a state. " +
 				"Use after browser_navigate on script-rendered pages, or to wait for a spinner to go away.",
@@ -339,6 +355,79 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 				return "", err
 			}
 			return "OK: typed into " + p.Selector, nil
+		},
+	})
+
+	register(br != nil, &Tool{
+		Capability: "browser",
+		Def: llm.ToolDefinition{
+			Name: "browser_tabs",
+			Description: "List the open browser tabs as index, title, and URL. " +
+				"The tab every other browser tool acts on is marked with *. " +
+				"Check this after clicking a link that may have opened a new tab.",
+			Parameters: emptyObjectSchema(),
+		},
+		Fn: func(ctx context.Context, args string) (string, error) {
+			tabs, err := br.ListTabs(ctx)
+			if err != nil {
+				return "", err
+			}
+			return strings.Join(tabs, "\n"), nil
+		},
+	})
+
+	register(br != nil, &Tool{
+		Capability: "browser",
+		Def: llm.ToolDefinition{
+			Name:        "browser_select_tab",
+			Description: "Point the other browser tools at a different tab, by its index from browser_tabs.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"index": map[string]any{"type": "integer"},
+				},
+				"required": []string{"index"},
+			},
+		},
+		Fn: func(ctx context.Context, args string) (string, error) {
+			var p struct {
+				Index int `json:"index"`
+			}
+			if err := json.Unmarshal([]byte(args), &p); err != nil {
+				return "", err
+			}
+			url, err := br.SelectTab(ctx, p.Index)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("OK: now on tab %d — %s", p.Index, url), nil
+		},
+	})
+
+	register(br != nil, &Tool{
+		Capability: "browser",
+		Def: llm.ToolDefinition{
+			Name:        "browser_close_tab",
+			Description: "Close a tab by its index from browser_tabs. Closing the active tab moves to another one.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"index": map[string]any{"type": "integer"},
+				},
+				"required": []string{"index"},
+			},
+		},
+		Fn: func(ctx context.Context, args string) (string, error) {
+			var p struct {
+				Index int `json:"index"`
+			}
+			if err := json.Unmarshal([]byte(args), &p); err != nil {
+				return "", err
+			}
+			if err := br.CloseTab(ctx, p.Index); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("OK: closed tab %d", p.Index), nil
 		},
 	})
 

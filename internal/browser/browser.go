@@ -68,7 +68,11 @@ type Browser struct {
 	mu      sync.Mutex
 	pw      *playwright.Playwright
 	browser playwright.Browser
-	page    playwright.Page
+	// bctx owns the tabs. Tab operations go through it rather than through
+	// page.Context() so that closing the active tab does not leave them
+	// reaching through a dead page.
+	bctx playwright.BrowserContext
+	page playwright.Page
 
 	closed bool
 }
@@ -290,6 +294,7 @@ func (b *Browser) init(ctx context.Context) error {
 
 	b.pw = pw
 	b.browser = br
+	b.bctx = bctx
 	b.page = page
 
 	if err := os.MkdirAll(b.opts.ScreenshotsDir, 0o755); err != nil {
@@ -610,34 +615,121 @@ func (b *Browser) Eval(ctx context.Context, script string) (string, error) {
 	return fmt.Sprintf("%v", res), nil
 }
 
-// ListTabs returns one-line descriptors of every open page in the connected
-// browser context.
+// Back returns the active tab to the previous entry in its history and reports
+// the URL it landed on.
+func (b *Browser) Back(ctx context.Context) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.init(ctx); err != nil {
+		return "", err
+	}
+	before := b.page.URL()
+	// Waiting for a lifecycle event here would hang until the timeout: going
+	// back usually restores the page from the back/forward cache, and a
+	// restored document fires neither DOMContentLoaded nor load again.
+	response, err := b.page.GoBack(playwright.PageGoBackOptions{
+		WaitUntil: playwright.WaitUntilStateCommit,
+	})
+	if err != nil {
+		return "", err
+	}
+	after := b.page.URL()
+	// A restore from that cache reports no response either, as does stepping
+	// back out of an anchor, so an unchanged URL — not a nil response — is what
+	// actually distinguishes an empty history.
+	if response == nil && after == before {
+		return "", errors.New("browser: no previous page in this tab's history")
+	}
+	log.Info("went back", "from", before, "to", after)
+	return after, nil
+}
+
+// ListTabs returns one-line descriptors of every open tab, marking the one the
+// other operations act on.
 func (b *Browser) ListTabs(ctx context.Context) ([]string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := b.init(ctx); err != nil {
 		return nil, err
 	}
-	out := []string{}
-	for i, p := range b.page.Context().Pages() {
-		title, _ := p.Title()
-		out = append(out, fmt.Sprintf("[%d] %s — %s", i, title, p.URL()))
+	pages := b.bctx.Pages()
+	descriptors := make([]string, 0, len(pages))
+	for index, page := range pages {
+		marker := " "
+		if page == b.page {
+			marker = "*"
+		}
+		title, _ := page.Title()
+		descriptors = append(descriptors, fmt.Sprintf("%s [%d] %s — %s", marker, index, title, page.URL()))
 	}
-	return out, nil
+	return descriptors, nil
 }
 
-// CloseTab closes the tab at the given index in the current context.
+// SelectTab points subsequent operations at the tab at index and returns its
+// URL. Clicking a link that opens in a new tab leaves the harness holding the
+// old page; this is how it moves across.
+func (b *Browser) SelectTab(ctx context.Context, index int) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.init(ctx); err != nil {
+		return "", err
+	}
+	pages := b.bctx.Pages()
+	if index < 0 || index >= len(pages) {
+		return "", tabIndexError(index, len(pages))
+	}
+	b.page = pages[index]
+	if err := b.page.BringToFront(); err != nil {
+		log.Warn("bring tab to front failed", "index", index, "err", err)
+	}
+	log.Info("selected tab", "index", index, "url", b.page.URL())
+	return b.page.URL(), nil
+}
+
+// CloseTab closes the tab at index.
+//
+// Closing the active tab would leave every later operation addressing a dead
+// page, and closing the last one can take the browser down with it, so a
+// replacement is chosen — or opened — before the close rather than after.
 func (b *Browser) CloseTab(ctx context.Context, index int) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := b.init(ctx); err != nil {
 		return err
 	}
-	pages := b.page.Context().Pages()
+	pages := b.bctx.Pages()
 	if index < 0 || index >= len(pages) {
-		return fmt.Errorf("browser: tab index %d out of range", index)
+		return tabIndexError(index, len(pages))
 	}
-	return pages[index].Close()
+	doomed := pages[index]
+	if doomed == b.page {
+		replacement, err := b.survivingTab(index, pages)
+		if err != nil {
+			return err
+		}
+		b.page = replacement
+	}
+	log.Info("closing tab", "index", index, "url", doomed.URL())
+	return doomed.Close()
+}
+
+// survivingTab picks the page that becomes active once the page at index is
+// closed, opening a blank one when index is the only tab left.
+func (b *Browser) survivingTab(index int, pages []playwright.Page) (playwright.Page, error) {
+	for position, page := range pages {
+		if position != index {
+			return page, nil
+		}
+	}
+	page, err := b.bctx.NewPage()
+	if err != nil {
+		return nil, fmt.Errorf("browser: open replacement tab: %w", err)
+	}
+	return page, nil
+}
+
+func tabIndexError(index, open int) error {
+	return fmt.Errorf("browser: tab index %d out of range (%d open; list them with browser_tabs)", index, open)
 }
 
 // execCapture runs a one-shot command inside the runtime container and

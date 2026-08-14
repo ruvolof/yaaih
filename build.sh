@@ -36,16 +36,21 @@ target="${1:-build}"
 
 usage() {
   cat <<EOF
-Usage: $0 {tidy|vendor|build|image|run|update-playwright|clean}
+Usage: $0 {tidy|vendor|build|image|test|cover|run|update-playwright|clean}
 
 Targets:
   tidy              - download dependencies into ./.go/pkg/mod
   vendor            - tidy + go mod vendor
   build             - build binary using vendored deps
   image             - build the runtime Docker image from the repo root Dockerfile
+  test              - vet + run the test suite under the race detector
+  cover             - test with coverage; prints a per-package table and writes an HTML report
   run               - build binary, build runtime image if missing, and run the harness with ./agents/chatter
   update-playwright - upgrade playwright-go to latest stable, then report the matching Dockerfile base image
   clean             - remove vendor/, .go/, and the binary
+
+Environment:
+  PKG               - package pattern for test/cover (default ./...), e.g. PKG=./internal/executor/
 EOF
 }
 
@@ -66,6 +71,28 @@ case "$target" in
     ;;
   image)
     docker build -t "$IMAGE" -f "$root/Dockerfile" "$root"
+    ;;
+  test)
+    go vet -mod=vendor "${PKG:-./...}"
+    go test -mod=vendor -race "${PKG:-./...}"
+    ;;
+  cover)
+    coverdir="$root/.go/cover"
+    profile="$coverdir/coverage.out"
+    mkdir -p "$coverdir"
+    go test -mod=vendor -race -covermode=atomic -coverprofile="$profile" -cover "${PKG:-./...}"
+    go tool cover -html="$profile" -o "$coverdir/coverage.html"
+    echo
+    echo "total: $(go tool cover -func="$profile" | awk 'END {print $NF}')"
+    echo
+    below=$(go tool cover -func="$profile" \
+      | awk '$1 != "total:" { pct = $3; sub(/%$/, "", pct); if (pct + 0 < 100) printf "%7.1f%%  %-28s %s\n", pct + 0, $2, $1 }' \
+      | sort -n)
+    echo "least-covered functions ($(printf '%s\n' "$below" | wc -l) below 100%, showing 40):"
+    printf '%s\n' "$below" | head -n 40
+    echo
+    echo "full per-function report: go tool cover -func=$profile"
+    echo "browsable line-by-line:   $coverdir/coverage.html"
     ;;
   update-playwright)
     go get -u github.com/mxschmitt/playwright-go

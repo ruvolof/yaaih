@@ -33,10 +33,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/stdcopy"
 
 	"github.com/ruvolof/aibitat-harness-go/internal/logging"
 	"github.com/ruvolof/aibitat-harness-go/internal/toolout"
@@ -113,12 +110,28 @@ type readResult struct {
 	err  error
 }
 
+// bashProcess is one attached bash: a writer for its stdin, a reader carrying
+// its stdout and stderr already demultiplexed into a single stream, and a
+// teardown that takes the process with it.
+type bashProcess struct {
+	stdin  io.Writer
+	stdout io.Reader
+	close  func()
+}
+
+// bashOpener starts one bash process for the executor to drive. Splitting it
+// out keeps the sentinel protocol — the part with the invariants worth getting
+// right — independent of how the process is attached.
+type bashOpener interface {
+	openBash(ctx context.Context) (*bashProcess, error)
+}
+
 // session bundles the state of one underlying bash invocation. When a command
 // times out we discard the current session and create a new one — that way no
 // stale data, lingering reader goroutine, or half-killed child process can
 // leak into subsequent commands.
 type session struct {
-	hijack  types.HijackedResponse
+	proc    *bashProcess
 	stdinW  io.Writer
 	stdoutR *bufio.Reader
 	lineCh  chan readResult // owned end-to-end by this session
@@ -128,9 +141,8 @@ type session struct {
 // the Docker exec API. The exec instance is hijacked so we get bidirectional
 // stdio over a single connection.
 type DockerExecutor struct {
-	cli         *client.Client
-	containerID string
-	timeout     time.Duration
+	opener  bashOpener
+	timeout time.Duration
 
 	mu     sync.Mutex
 	closed bool
@@ -149,62 +161,48 @@ func NewDockerExecutor(ctx context.Context, cli *client.Client, containerID stri
 		return nil, errors.New("executor: empty container id")
 	}
 
-	e := &DockerExecutor{
-		cli:         cli,
-		containerID: containerID,
-		timeout:     timeout,
-		cwd:         initialCWD,
+	e, err := newExecutor(ctx, dockerBash{cli: cli, containerID: containerID}, timeout)
+	if err != nil {
+		return nil, err
 	}
+	log.Info("bash session started",
+		"container_id", containerID[:12],
+		"cwd", e.cwd,
+		"timeout", timeout.String(),
+	)
+	return e, nil
+}
 
+// newExecutor drives the first handshake and leaves the executor ready for
+// commands.
+func newExecutor(ctx context.Context, opener bashOpener, timeout time.Duration) (*DockerExecutor, error) {
+	e := &DockerExecutor{
+		opener:  opener,
+		timeout: timeout,
+		cwd:     initialCWD,
+	}
 	sess, cwd, err := e.openSession(ctx)
 	if err != nil {
 		return nil, err
 	}
 	e.sess = sess
 	e.cwd = cwd
-	log.Info("bash session started",
-		"container_id", containerID[:12],
-		"cwd", cwd,
-		"timeout", timeout.String(),
-	)
 	return e, nil
 }
 
-// openSession creates a fresh bash session inside the container, starts the
-// reader goroutine, and primes bash so the first prompt sentinel arrives.
-// Used both by NewDockerExecutor and by the timeout-recovery restart path.
+// openSession starts a fresh bash, starts the reader goroutine, and primes
+// bash so the first prompt sentinel arrives. Used both by the constructor and
+// by the timeout-recovery restart path.
 func (e *DockerExecutor) openSession(ctx context.Context) (*session, string, error) {
-	execID, err := e.cli.ContainerExecCreate(ctx, e.containerID, container.ExecOptions{
-		AttachStdin:  true,
-		AttachStdout: true,
-		AttachStderr: true,
-		Tty:          false,
-		Cmd:          []string{"bash", "--norc", "--noprofile"},
-		WorkingDir:   initialCWD,
-		Env: []string{
-			"TERM=dumb",
-			"PAGER=cat",
-		},
-	})
+	proc, err := e.opener.openBash(ctx)
 	if err != nil {
-		return nil, "", fmt.Errorf("executor: exec create: %w", err)
+		return nil, "", err
 	}
-	hijack, err := e.cli.ContainerExecAttach(ctx, execID.ID, container.ExecAttachOptions{Tty: false})
-	if err != nil {
-		return nil, "", fmt.Errorf("executor: exec attach: %w", err)
-	}
-
-	pr, pw := io.Pipe()
-	go func() {
-		defer logging.Recover("executor.stdcopy")
-		_, copyErr := stdcopy.StdCopy(pw, pw, hijack.Reader)
-		_ = pw.CloseWithError(copyErr)
-	}()
 
 	s := &session{
-		hijack:  hijack,
-		stdinW:  hijack.Conn,
-		stdoutR: bufio.NewReader(pr),
+		proc:    proc,
+		stdinW:  proc.stdin,
+		stdoutR: bufio.NewReader(proc.stdout),
 		lineCh:  make(chan readResult, readerChanBuf),
 	}
 	go s.readerLoop()
@@ -250,13 +248,13 @@ func (s *session) readerLoop() {
 	}
 }
 
-// close tears down a session: closing the hijack causes the underlying read
-// in readerLoop to return EOF, which makes the reader exit.
+// close tears down a session: ending the attached process causes the
+// underlying read in readerLoop to return EOF, which makes the reader exit.
 func (s *session) close() {
 	if s == nil {
 		return
 	}
-	s.hijack.Close()
+	s.proc.close()
 }
 
 // drainPending discards any lines currently buffered on the session's

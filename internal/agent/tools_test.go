@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"slices"
 	"sort"
 	"testing"
 
@@ -14,15 +15,23 @@ import (
 var builtinCapabilities = map[string]string{
 	"shell_exec":         "shell",
 	"browser_navigate":   "browser",
+	"browser_back":       "browser",
+	"browser_wait_for":   "browser",
 	"browser_content":    "browser",
 	"browser_screenshot": "browser",
 	"browser_click":      "browser",
 	"browser_type":       "browser",
+	"browser_tabs":       "browser",
+	"browser_select_tab": "browser",
+	"browser_close_tab":  "browser",
 	"browser_eval":       "browser",
 	"file_read":          "filesystem",
 	"file_write":         "filesystem",
 	"file_list":          "filesystem",
 }
+
+// allCapabilities is every capability a built-in can be tagged with.
+var allCapabilities = []string{"shell", "browser", "filesystem"}
 
 // fullRegistry builds a registry with every dependency present, so capability
 // filtering is the only thing that can withhold a tool. The browser is a bare
@@ -146,5 +155,64 @@ func TestRegistrySkipsToolsWithoutDependencies(t *testing.T) {
 
 	if got := definitionNames(registry, allCaps); len(got) != 3 {
 		t.Errorf("definitions without a sandbox = %v, want the three file_* tools", got)
+	}
+}
+
+// The table above is what every capability assertion in this file iterates
+// over, so a built-in registered without an entry would be exempt from all of
+// them rather than failing anything.
+func TestBuiltinCapabilitiesListsEveryRegisteredTool(t *testing.T) {
+	for _, name := range definitionNames(fullRegistry(t), allCapabilities) {
+		if _, listed := builtinCapabilities[name]; !listed {
+			t.Errorf("built-in %q is registered but not listed in builtinCapabilities", name)
+		}
+	}
+}
+
+// /reload rebuilds the script tools from disk. Clearing them must take exactly
+// the previous generation — a built-in swept up with them would leave the agent
+// short a capability it declared, with nothing in the UI to say so.
+func TestRemoveByCapabilityClearsOnlyThatGeneration(t *testing.T) {
+	registry := fullRegistry(t)
+	builtinsBefore := definitionNames(registry, allCapabilities)
+
+	registry.Add(&Tool{Capability: "scripts", Def: toolDef("deploy_staging")})
+	registry.Add(&Tool{Capability: "scripts", Def: toolDef("tail_logs")})
+
+	if _, ok := registry.Enabled("deploy_staging", []string{"scripts"}); !ok {
+		t.Fatal("a freshly added script tool is not dispatchable")
+	}
+
+	if removed := registry.RemoveByCapability("scripts"); removed != 2 {
+		t.Errorf("removed %d tools, want the 2 script tools", removed)
+	}
+	if _, ok := registry.Lookup("tail_logs"); ok {
+		t.Error("a script tool deleted from disk is still registered after a reload")
+	}
+	if got := definitionNames(registry, allCapabilities); !slices.Equal(got, builtinsBefore) {
+		t.Errorf("built-ins after the sweep = %v, want %v", got, builtinsBefore)
+	}
+	if removed := registry.RemoveByCapability("scripts"); removed != 0 {
+		t.Errorf("a second sweep removed %d tools, want 0", removed)
+	}
+}
+
+// A script tool that takes a built-in's name replaces it, which is how the
+// registry is documented to behave; the sweep must then not leave a hole where
+// the built-in used to be.
+func TestAddReplacesAToolOfTheSameName(t *testing.T) {
+	registry := fullRegistry(t)
+
+	registry.Add(&Tool{Capability: "scripts", Def: toolDef("shell_exec")})
+
+	tool, ok := registry.Enabled("shell_exec", []string{"scripts"})
+	if !ok {
+		t.Fatal("the replacement is not dispatchable under its own capability")
+	}
+	if tool.Capability != "scripts" {
+		t.Errorf("capability = %q, want the replacement's own", tool.Capability)
+	}
+	if _, ok := registry.Enabled("shell_exec", []string{"shell"}); ok {
+		t.Error("the replaced built-in is still reachable under the shell capability")
 	}
 }

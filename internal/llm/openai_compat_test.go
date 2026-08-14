@@ -2,7 +2,9 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -54,13 +56,43 @@ func (t *connTracker) waitForLiveConns(want int, timeout time.Duration) int {
 	}
 }
 
+// requestLog keeps the bodies the server was sent, so a test can assert on what
+// went on the wire rather than on the params struct handed to the SDK — the
+// wire shape is what a provider rejects with a 400.
+type requestLog struct {
+	mu     sync.Mutex
+	bodies [][]byte
+}
+
+func (l *requestLog) add(body []byte) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.bodies = append(l.bodies, body)
+}
+
+// decode unmarshals the nth recorded body into a generic map.
+func (l *requestLog) decode(t *testing.T, n int) map[string]any {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if n >= len(l.bodies) {
+		t.Fatalf("no request %d was sent (%d in total)", n, len(l.bodies))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(l.bodies[n], &payload); err != nil {
+		t.Fatalf("request %d is not JSON: %v", n, err)
+	}
+	return payload
+}
+
 // sseServer serves keep-alive SSE responses built by the supplied writer. The
 // writer receives a hold func that blocks until either the client hangs up or
 // the test ends, letting a handler keep a response open the way a provider
 // with more of the stream still to send would.
-func sseServer(t *testing.T, write func(w http.ResponseWriter, flush func(), hold func())) (*httptest.Server, *connTracker) {
+func sseServer(t *testing.T, write func(w http.ResponseWriter, flush func(), hold func())) (*httptest.Server, *connTracker, *requestLog) {
 	t.Helper()
 	tracker := newConnTracker()
+	requests := &requestLog{}
 	stall := make(chan struct{})
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
@@ -68,6 +100,12 @@ func sseServer(t *testing.T, write func(w http.ResponseWriter, flush func(), hol
 			t.Errorf("response writer is not a flusher")
 			return
 		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
+		requests.add(body)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		write(w, flusher.Flush, func() {
@@ -83,7 +121,7 @@ func sseServer(t *testing.T, write func(w http.ResponseWriter, flush func(), hol
 		close(stall)
 		srv.Close()
 	})
-	return srv, tracker
+	return srv, tracker, requests
 }
 
 func chunkEvent(id, content string) string {
@@ -106,7 +144,7 @@ func stubRequest() *ChatRequest {
 // closes the stream, the socket and its two transport goroutines stay parked
 // for the life of the process and every later turn has to dial afresh.
 func TestStreamChatReleasesConnectionOnStreamError(t *testing.T) {
-	srv, tracker := sseServer(t, func(w http.ResponseWriter, flush func(), hold func()) {
+	srv, tracker, _ := sseServer(t, func(w http.ResponseWriter, flush func(), hold func()) {
 		fmt.Fprint(w, chunkEvent("stub", "partial answer"))
 		flush()
 		fmt.Fprint(w, errorEvent)
@@ -141,7 +179,7 @@ func TestStreamChatReleasesConnectionOnStreamError(t *testing.T) {
 // TestStreamChatReusesConnectionOnSuccess guards the other half of the fix:
 // closing the stream must not cost keep-alive reuse on the happy path.
 func TestStreamChatReusesConnectionOnSuccess(t *testing.T) {
-	srv, tracker := sseServer(t, func(w http.ResponseWriter, flush func(), _ func()) {
+	srv, tracker, _ := sseServer(t, func(w http.ResponseWriter, flush func(), _ func()) {
 		fmt.Fprint(w, chunkEvent("stub", "hello"))
 		flush()
 		fmt.Fprint(w, usageEvent)

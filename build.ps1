@@ -7,14 +7,22 @@
 #   .\build.ps1 vendor   # tidy + go mod vendor
 #   .\build.ps1 build    # build the binary using vendored deps
 #   .\build.ps1 image    # build the runtime Docker image from the repo root Dockerfile
+#   .\build.ps1 test     # vet + run the test suite under the race detector
+#   .\build.ps1 cover    # test with coverage; per-package table plus an HTML report
 #   .\build.ps1 run      # build binary, build runtime image if missing, and run the harness
 #   .\build.ps1 update-playwright # upgrade playwright-go, then report the matching Dockerfile base image
 #   .\build.ps1 clean    # remove vendor/, .go/, and the binary
+#
+# -Pkg narrows test and cover to one package, e.g.
+#
+#   .\build.ps1 cover -Pkg ./internal/executor/
 
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('tidy', 'vendor', 'build', 'image', 'run', 'update-playwright', 'clean')]
-    [string]$Target = 'build'
+    [ValidateSet('tidy', 'vendor', 'build', 'image', 'test', 'cover', 'run', 'update-playwright', 'clean')]
+    [string]$Target = 'build',
+
+    [string]$Pkg = './...'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,6 +47,16 @@ function Build-RuntimeImage {
     if ($LASTEXITCODE -ne 0) { throw "docker build failed for $image" }
 }
 
+# The race detector needs cgo, which on Windows means a gcc on PATH. Without one
+# the tests still run, but several of them — the turn loop, the executor's bash
+# session, the governor — are only meaningful under -race, so say so rather than
+# reporting a quieter pass.
+function Get-RaceArgs {
+    if (Get-Command gcc -ErrorAction SilentlyContinue) { return @('-race') }
+    Write-Warning 'no gcc on PATH: running without the race detector. Install mingw-w64 to match what build.sh runs.'
+    return @()
+}
+
 switch ($Target) {
     'tidy'   { & $go mod tidy }
     'vendor' { & $go mod tidy; & $go mod vendor }
@@ -50,6 +68,51 @@ switch ($Target) {
         & $go build -mod=vendor -o aibitat-harness-go.exe .
     }
     'image'  { Build-RuntimeImage }
+    'test'   {
+        $race = @(Get-RaceArgs)
+        & $go vet -mod=vendor $Pkg
+        if ($LASTEXITCODE -ne 0) { throw 'go vet failed' }
+        & $go test -mod=vendor @race $Pkg
+        if ($LASTEXITCODE -ne 0) { throw 'go test failed' }
+    }
+    'cover'  {
+        $race = @(Get-RaceArgs)
+        $coverDir = Join-Path $root '.go/cover'
+        $profilePath = Join-Path $coverDir 'coverage.out'
+        $htmlPath = Join-Path $coverDir 'coverage.html'
+        New-Item -ItemType Directory -Force -Path $coverDir | Out-Null
+
+        # A native-command argument of the form -key=$var is passed through
+        # literally unless the whole token is a quoted string.
+        & $go test -mod=vendor @race -covermode=atomic "-coverprofile=$profilePath" -cover $Pkg
+        if ($LASTEXITCODE -ne 0) { throw 'go test failed' }
+        & $go tool cover "-html=$profilePath" -o $htmlPath
+
+        $report = & $go tool cover "-func=$profilePath"
+        $below = $report |
+            Where-Object { $_ -notmatch '^total:' } |
+            ForEach-Object {
+                $fields = $_ -split '\s+'
+                [pscustomobject]@{
+                    Pct   = [double]($fields[-1] -replace '%$', '')
+                    Func  = $fields[1]
+                    Where = $fields[0]
+                }
+            } |
+            Where-Object { $_.Pct -lt 100 } |
+            Sort-Object Pct
+
+        Write-Host ''
+        Write-Host "total: $((($report | Select-Object -Last 1) -split '\s+')[-1])"
+        Write-Host ''
+        Write-Host "least-covered functions ($($below.Count) below 100%, showing 40):"
+        $below | Select-Object -First 40 | ForEach-Object {
+            Write-Host ('{0,7:N1}%  {1,-28} {2}' -f $_.Pct, $_.Func, $_.Where)
+        }
+        Write-Host ''
+        Write-Host "full per-function report: go tool cover -func=$profilePath"
+        Write-Host "browsable line-by-line:   $htmlPath"
+    }
     'update-playwright' {
         & $go get -u github.com/mxschmitt/playwright-go
         & $go mod tidy

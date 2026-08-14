@@ -15,7 +15,7 @@ export GOMODCACHE  := $(CURDIR)/.go/pkg/mod
 export GOCACHE     := $(CURDIR)/.go/cache
 export GOBIN       := $(CURDIR)/.go/bin
 
-.PHONY: all tidy vendor build image test clean run
+.PHONY: all tidy vendor build image test cover clean run
 
 all: vendor build image
 
@@ -35,9 +35,15 @@ build:
 image:
 	docker build -t $(IMAGE) -f $(DOCKERFILE) .
 
-# Run the test suite.
+# Run the test suite. The race detector is not optional here: the turn loop, the
+# executor session and the governor are all exercised concurrently.
 test:
-	go test -mod=vendor ./...
+	go vet -mod=vendor ./...
+	go test -mod=vendor -race ./...
+
+# Test with coverage and write a browsable report.
+cover:
+	./build.sh cover
 
 # Remove build artifacts, vendored deps, and the project-local Go caches.
 clean:
