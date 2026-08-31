@@ -2,14 +2,10 @@
 package agent
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -456,12 +452,12 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 		},
 	})
 
-	// Filesystem tools — read/list are unrestricted, write is restricted.
-	// All paths are resolved against the workspace root so the agent can't
-	// reach outside the bind mount.
-	workspace := cfg.Runtime.Workspace
+	// Filesystem tools — read/list are unrestricted, write is restricted. They
+	// execute inside the sandbox container through the executor (see
+	// containerfs.go), so the workspace bind mount is the boundary the agent
+	// cannot reach past — symlinks included.
 	defaultReadLines := cfg.Options.MaxFileReadLines
-	register(true, &Tool{
+	register(runner != nil, &Tool{
 		Capability: "filesystem",
 		Def: llm.ToolDefinition{
 			Name: "file_read",
@@ -495,25 +491,17 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 			if err := json.Unmarshal([]byte(args), &p); err != nil {
 				return "", err
 			}
-			full, err := resolveWorkspacePath(workspace, p.Path)
-			if err != nil {
-				return "", err
-			}
 			if p.Offset <= 0 {
 				p.Offset = 1
 			}
 			if p.Limit <= 0 {
 				p.Limit = defaultReadLines
 			}
-			window, total, err := readFileWindow(full, p.Offset, p.Limit)
-			if err != nil {
-				return "", err
-			}
-			return describeWindow(p.Path, p.Offset, p.Limit, total) + window, nil
+			return containerFileRead(ctx, runner, executor.ContainerWorkspace, p.Path, p.Offset, p.Limit)
 		},
 	})
 
-	register(true, &Tool{
+	register(runner != nil, &Tool{
 		Capability: "filesystem",
 		Restricted: true,
 		Def: llm.ToolDefinition{
@@ -536,21 +524,11 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 			if err := json.Unmarshal([]byte(args), &p); err != nil {
 				return "", err
 			}
-			full, err := resolveWorkspacePath(workspace, p.Path)
-			if err != nil {
-				return "", err
-			}
-			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-				return "", err
-			}
-			if err := os.WriteFile(full, []byte(p.Content), 0o644); err != nil {
-				return "", err
-			}
-			return fmt.Sprintf("Wrote %d bytes to %s", len(p.Content), p.Path), nil
+			return containerFileWrite(ctx, runner, executor.ContainerWorkspace, p.Path, p.Content)
 		},
 	})
 
-	register(true, &Tool{
+	register(runner != nil, &Tool{
 		Capability: "filesystem",
 		Def: llm.ToolDefinition{
 			Name:        "file_list",
@@ -570,75 +548,11 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 			if err := json.Unmarshal([]byte(args), &p); err != nil {
 				return "", err
 			}
-			full, err := resolveWorkspacePath(workspace, p.Path)
-			if err != nil {
-				return "", err
-			}
-			entries, err := os.ReadDir(full)
-			if err != nil {
-				return "", err
-			}
-			var b strings.Builder
-			for _, e := range entries {
-				kind := "f"
-				if e.IsDir() {
-					kind = "d"
-				}
-				fmt.Fprintf(&b, "%s  %s\n", kind, e.Name())
-			}
-			return b.String(), nil
+			return containerFileList(ctx, runner, executor.ContainerWorkspace, p.Path)
 		},
 	})
 
 	return r
-}
-
-// readFileWindow returns the lines of a file in [offset, offset+limit) along
-// with its total line count. Lines are streamed rather than read whole so the
-// cost is the window, not the file — and so a file with one enormous line
-// yields that line instead of an error.
-func readFileWindow(fullPath string, offset, limit int) (window string, total int, err error) {
-	file, err := os.Open(fullPath)
-	if err != nil {
-		return "", 0, err
-	}
-	defer file.Close()
-
-	reader := bufio.NewReader(file)
-	var out strings.Builder
-	for {
-		line, readErr := reader.ReadString('\n')
-		if line != "" {
-			total++
-			if total >= offset && total < offset+limit {
-				out.WriteString(line)
-			}
-		}
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				return out.String(), total, nil
-			}
-			return "", 0, readErr
-		}
-	}
-}
-
-// describeWindow is the header above a page of file content: which lines these
-// are, how many there are in total, and how to ask for the next page. Without
-// it a page reads like a whole file that happens to end abruptly.
-func describeWindow(displayPath string, offset, limit, total int) string {
-	if total == 0 {
-		return fmt.Sprintf("[%s: empty file]\n", displayPath)
-	}
-	if offset > total {
-		return fmt.Sprintf("[%s: offset %d is past the end; the file has %d lines]\n", displayPath, offset, total)
-	}
-	last := min(offset+limit-1, total)
-	if last < total {
-		return fmt.Sprintf("[%s: lines %d-%d of %d — call again with offset %d for the next page]\n",
-			displayPath, offset, last, total, last+1)
-	}
-	return fmt.Sprintf("[%s: lines %d-%d of %d]\n", displayPath, offset, last, total)
 }
 
 func emptyObjectSchema() map[string]any {
@@ -646,30 +560,4 @@ func emptyObjectSchema() map[string]any {
 		"type":       "object",
 		"properties": map[string]any{},
 	}
-}
-
-// resolveWorkspacePath joins rel onto root and rejects any path that escapes
-// the workspace via "..", absolute paths, or symlinks-on-disk traversal at
-// resolve time. (Symlinks created later inside the workspace are out of scope
-// for v1 — the workspace is treated as semi-trusted territory.)
-func resolveWorkspacePath(root, rel string) (string, error) {
-	clean := filepath.Clean(rel)
-	if filepath.IsAbs(clean) {
-		return "", fmt.Errorf("path must be relative to the workspace: %q", rel)
-	}
-	full := filepath.Join(root, clean)
-	// Ensure full is still inside root.
-	rootAbs, err := filepath.Abs(root)
-	if err != nil {
-		return "", err
-	}
-	fullAbs, err := filepath.Abs(full)
-	if err != nil {
-		return "", err
-	}
-	if !strings.HasPrefix(fullAbs+string(filepath.Separator), rootAbs+string(filepath.Separator)) &&
-		fullAbs != rootAbs {
-		return "", fmt.Errorf("path escapes workspace: %q", rel)
-	}
-	return fullAbs, nil
 }

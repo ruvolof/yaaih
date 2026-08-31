@@ -52,9 +52,10 @@ func (a *Agent) spillToolResult(toolCallID, name, content string) string {
 }
 
 // spillAccess returns a function rendering the note for a spill filename, or
-// nil when the agent has no tool that could open it. The path has to be
-// expressed in terms of whichever tool it will be handed to: shell commands run
-// in the container, file_read resolves against the workspace root.
+// nil when the agent has no tool that could open it. Both tools need the
+// sandbox runner; the path has to be expressed in terms of whichever one it
+// will be handed to: shell commands take container paths, file_read resolves
+// against the workspace root.
 func (a *Agent) spillAccess() func(file string) string {
 	switch {
 	case a.runner != nil && a.cfg.HasCapability("shell"):
@@ -62,7 +63,7 @@ func (a *Agent) spillAccess() func(file string) string {
 			return "full output: " + path.Join(executor.ContainerWorkspace, spillDirName, file) +
 				" — grep, sed or tail it with shell_exec to get the part you need"
 		}
-	case a.cfg.HasCapability("filesystem"):
+	case a.runner != nil && a.cfg.HasCapability("filesystem"):
 		return func(file string) string {
 			return "full output: " + path.Join(spillDirName, file) +
 				" — read it with file_read, a page at a time"

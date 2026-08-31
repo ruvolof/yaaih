@@ -44,6 +44,33 @@ go mod vendor
 go build -mod=vendor -o aibitat-harness-go .
 ```
 
+### Tests and coverage
+
+```bash
+./build.sh test
+```
+
+Runs `go vet` and then the suite under the race detector. Several packages are
+exercised concurrently on purpose (the turn loop, the executor's bash session,
+the governor), so a run without `-race` proves less than it appears to.
+
+```bash
+./build.sh cover
+```
+
+Same run with coverage: prints a per-package table, the overall total, and the
+least-covered functions, then writes a line-by-line HTML report to
+`.go/cover/coverage.html`. Set `PKG` to narrow either target to one package:
+
+```bash
+PKG=./internal/executor/ ./build.sh cover
+```
+
+Some tests need something the host may not have and skip themselves when it is
+missing — the browser tab tests want a `chromium` binary and the Playwright
+driver, and nothing here talks to a Docker daemon. A skip is reported as `ok`,
+so read the `-v` output if you want to know which ones actually ran.
+
 ### Clean
 
 ```bash
@@ -271,6 +298,25 @@ trade-off is that content a page renders from script may not be there yet —
 Every browser operation is bounded by `options.browser_timeout` (default 30s),
 including clicks and typing, which would otherwise sit on playwright's own 30s
 default regardless of what you configured.
+
+`browser_content` returns the page as Markdown, led by its title and current URL
+— which is how the agent learns where a redirect actually landed. It reads
+`<main>` or `<article>` when the page marks one (falling back to the whole body
+if that turns out to be an empty shell), drops `nav`, `footer`, `aside`, and
+anything `hidden` or `aria-hidden`, and keeps headings, lists, tables, and code
+blocks. Link targets come out as absolute URLs, so a link in the output can be
+handed straight back to `browser_navigate`. A single extraction stops at 200k
+characters with a marker saying so; what the model actually sees is then bounded
+by `options.max_tool_result_bytes` in the usual way, with the remainder spilled
+to disk.
+
+Clicking a link that opens in a new tab leaves the harness holding the old page,
+which otherwise looks like a click that did nothing. `browser_tabs` lists what is
+open and marks the tab the other tools act on, `browser_select_tab` moves across
+by index, and `browser_close_tab` closes one — moving off it first if it is the
+active tab, and opening a replacement if it is the last one, so the browser is
+never left without a usable page. `browser_back` steps back through the current
+tab's history.
 
 The sandboxed Chromium presents itself as ordinary desktop Chrome: a real
 desktop User-Agent derived from its own version rather than the default

@@ -39,11 +39,7 @@ var allCapabilities = []string{"shell", "browser", "filesystem"}
 // are reachable, never invoke one.
 func fullRegistry(t *testing.T) *Registry {
 	t.Helper()
-	return NewRegistry(
-		&config.Config{Runtime: config.RuntimeCfg{Workspace: t.TempDir()}},
-		&stubRunner{},
-		&browser.Browser{},
-	)
+	return NewRegistry(&config.Config{}, &stubRunner{}, &browser.Browser{})
 }
 
 func definitionNames(r *Registry, caps []string) []string {
@@ -129,32 +125,24 @@ func TestUntaggedToolIsAlwaysAvailable(t *testing.T) {
 }
 
 // TestRegistrySkipsToolsWithoutDependencies is the defence in depth: with no
-// sandbox there is no runner or browser to close over, so those tools are never
-// registered and cannot be reached even by an agent that declares the
-// capability.
+// sandbox there is no runner or browser to close over, so no built-in — the
+// filesystem tools execute through the runner too — is ever registered, and
+// none can be reached even by an agent that declares the capability.
 func TestRegistrySkipsToolsWithoutDependencies(t *testing.T) {
-	registry := NewRegistry(&config.Config{Runtime: config.RuntimeCfg{Workspace: t.TempDir()}}, nil, nil)
+	registry := NewRegistry(&config.Config{}, nil, nil)
 	allCaps := []string{"shell", "browser", "filesystem"}
 
-	for name, capability := range builtinCapabilities {
-		_, registered := registry.Lookup(name)
-		switch capability {
-		case "filesystem":
-			if !registered {
-				t.Errorf("%s: filesystem tools need no sandbox and should still be registered", name)
-			}
-		default:
-			if registered {
-				t.Errorf("%s: registered without its dependency", name)
-			}
-			if _, ok := registry.Enabled(name, allCaps); ok {
-				t.Errorf("%s: dispatchable without its dependency", name)
-			}
+	for name := range builtinCapabilities {
+		if _, registered := registry.Lookup(name); registered {
+			t.Errorf("%s: registered without its dependency", name)
+		}
+		if _, ok := registry.Enabled(name, allCaps); ok {
+			t.Errorf("%s: dispatchable without its dependency", name)
 		}
 	}
 
-	if got := definitionNames(registry, allCaps); len(got) != 3 {
-		t.Errorf("definitions without a sandbox = %v, want the three file_* tools", got)
+	if got := definitionNames(registry, allCaps); len(got) != 0 {
+		t.Errorf("definitions without a sandbox = %v, want none", got)
 	}
 }
 

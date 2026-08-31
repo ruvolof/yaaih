@@ -166,14 +166,12 @@ func TestTruncatedToolResultSpillsFullOutput(t *testing.T) {
 // the file in the terms file_read understands.
 func TestSpillPointerMatchesAvailableTools(t *testing.T) {
 	huge := distinctLines(50000)
+	runner := &stubRunner{output: huge + "\n" + containerFSMarker + " ok 50000\n"}
 	provider := &stubProvider{responses: []*llm.ChatResponse{
 		toolCallResponse("call-1", "file_read", `{"path":"big.log"}`),
 		textResponse("done"),
 	}}
-	agent := newTestAgent(t, []string{"filesystem"}, provider, nil)
-	if err := os.WriteFile(filepath.Join(agent.cfg.Runtime.Workspace, "big.log"), []byte(huge), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	agent := newTestAgent(t, []string{"filesystem"}, provider, runner)
 
 	reply := toolReply(t, runOneToolCall(t, agent), "call-1")
 
