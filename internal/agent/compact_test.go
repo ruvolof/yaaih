@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ruvolof/aibitat-harness-go/internal/config"
+	"github.com/ruvolof/aibitat-harness-go/internal/executor"
 	"github.com/ruvolof/aibitat-harness-go/internal/governor"
 	"github.com/ruvolof/aibitat-harness-go/internal/llm"
 	"github.com/ruvolof/aibitat-harness-go/internal/session"
@@ -14,6 +15,13 @@ import (
 // newPersistedTestAgent writes a real transcript, so a test can reopen what a
 // compaction left behind the way a resumed session does.
 func newPersistedTestAgent(t *testing.T, provider llm.Provider) (*Agent, string, session.ID) {
+	t.Helper()
+	return newPersistedTestAgentWithRunner(t, provider, &stubRunner{})
+}
+
+// newPersistedTestAgentWithRunner is newPersistedTestAgent for a test that has
+// to hold the turn open inside a tool call.
+func newPersistedTestAgentWithRunner(t *testing.T, provider llm.Provider, runner executor.Executor) (*Agent, string, session.ID) {
 	t.Helper()
 	sessionsDir := t.TempDir()
 	id := session.NewID()
@@ -29,7 +37,7 @@ func newPersistedTestAgent(t *testing.T, provider llm.Provider) (*Agent, string,
 		Options:      windowedOptions(64_000),
 	}
 	agent := New(cfg, provider, governor.New(cfg.Model), governor.New(cfg.Model),
-		&stubRunner{}, nil, NewGatekeeper(false), writer, nil, sessionsDir)
+		runner, nil, NewGatekeeper(false), writer, nil, sessionsDir)
 	return agent, sessionsDir, id
 }
 

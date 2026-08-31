@@ -7,6 +7,7 @@ import (
 
 	"github.com/ruvolof/aibitat-harness-go/internal/browser"
 	"github.com/ruvolof/aibitat-harness-go/internal/config"
+	"github.com/ruvolof/aibitat-harness-go/internal/llm"
 )
 
 // builtinCapabilities lists every built-in and the capability that unlocks it.
@@ -203,4 +204,34 @@ func TestAddReplacesAToolOfTheSameName(t *testing.T) {
 	if _, ok := registry.Enabled("shell_exec", []string{"shell"}); ok {
 		t.Error("the replaced built-in is still reachable under the shell capability")
 	}
+}
+
+// The tool list is part of every request, and a provider that caches the
+// tokenised prefix of a prompt charges full price for one that arrives in a
+// different order. Ranging over the registry's map would reorder it on every
+// iteration of every turn.
+func TestDefinitionsComeBackInTheSameOrderEveryTime(t *testing.T) {
+	registry := fullRegistry(t)
+	registry.Add(&Tool{Def: llm.ToolDefinition{Name: "aaa_script_tool"}, Capability: "script"})
+	registry.Add(&Tool{Def: llm.ToolDefinition{Name: "zzz_script_tool"}, Capability: "script"})
+
+	caps := append(slices.Clone(allCapabilities), "script")
+	first := names(registry.Definitions(caps))
+	if !slices.IsSorted(first) {
+		t.Errorf("definitions = %v, want them by name", first)
+	}
+	for call := 0; call < 20; call++ {
+		if got := names(registry.Definitions(caps)); !slices.Equal(got, first) {
+			t.Fatalf("call %d returned %v, want the same order as %v", call, got, first)
+		}
+	}
+}
+
+// names is definitionNames without the sort, for a test about ordering.
+func names(defs []llm.ToolDefinition) []string {
+	out := make([]string, 0, len(defs))
+	for _, def := range defs {
+		out = append(out, def.Name)
+	}
+	return out
 }

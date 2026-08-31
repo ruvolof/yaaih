@@ -4,6 +4,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/ruvolof/aibitat-harness-go/internal/agent"
+	"github.com/ruvolof/aibitat-harness-go/internal/config"
+	"github.com/ruvolof/aibitat-harness-go/internal/governor"
 )
 
 // The gauge is the operator's warning that a compaction is coming. A stats
@@ -103,5 +107,75 @@ func TestCommittingAnEmptyReplyChangesNothing(t *testing.T) {
 
 	if body := stripANSI(m.chatBuf.String()); body != "only line" {
 		t.Errorf("transcript = %q, want it untouched", body)
+	}
+}
+
+// newTestModel is a Model with just enough of an agent behind it for the event
+// handlers to run: they re-subscribe to the event stream after every message.
+func newTestModel(t *testing.T) *Model {
+	t.Helper()
+	cfg := &config.Config{
+		Model:        "stub-model",
+		SystemPrompt: "you are a test agent",
+		Runtime:      config.RuntimeCfg{Workspace: t.TempDir()},
+	}
+	ag := agent.New(cfg, nil, governor.New(cfg.Model), governor.New(cfg.Model),
+		nil, nil, agent.NewGatekeeper(false), nil, nil, t.TempDir())
+	t.Cleanup(ag.Close)
+	return &Model{ag: ag}
+}
+
+// The agent reports trouble with ErrorMsg and ends a turn with
+// AssistantDoneMsg; only the second may release the UI. An error can arrive
+// while a turn is still running — a second message sent by mistake is answered
+// with exactly one — and ending the turn on it would hand /new, /resume and
+// /reload a conversation the turn is still writing to, and leave esc pointing
+// at nothing.
+func TestOnlyTheDoneEventEndsATurn(t *testing.T) {
+	m := newTestModel(t)
+	m.busy = true
+	m.cancelTurn = func() {}
+
+	m.Update(agent.ErrorMsg{Err: "agent is still working on the previous turn"})
+
+	if !m.busy {
+		t.Error("an error ended a turn that is still running")
+	}
+	if m.cancelTurn == nil {
+		t.Error("the running turn lost its stop key")
+	}
+	if !m.refuseIfBusy("new") {
+		t.Error("a session switch was allowed while the turn was still running")
+	}
+
+	m.Update(agent.AssistantDoneMsg{})
+
+	if m.busy {
+		t.Error("the turn ended but the UI is still showing it as running")
+	}
+	if m.cancelTurn != nil {
+		t.Error("the stop key still points at a turn that has ended")
+	}
+}
+
+// Teardown waits for the turn to unwind before it closes the session file and
+// the sandbox, so a quit that leaves the turn running is a quit the operator
+// waits out.
+func TestQuittingStopsTheTurnItLeavesBehind(t *testing.T) {
+	m := newTestModel(t)
+	stopped := false
+	m.busy = true
+	m.cancelTurn = func() { stopped = true }
+
+	if cmd := m.quit(); cmd == nil {
+		t.Fatal("quit returned no command, so the program would not exit")
+	}
+	if !stopped {
+		t.Error("quitting left the turn running")
+	}
+
+	idle := newTestModel(t)
+	if cmd := idle.quit(); cmd == nil {
+		t.Error("quitting with no turn in flight returned no command")
 	}
 }

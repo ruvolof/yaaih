@@ -92,7 +92,7 @@ func init() {
 		Name:        "exit",
 		Aliases:     []string{"quit"},
 		Description: "Quit the harness.",
-		Handler:     func(m *Model, args string) tea.Cmd { return tea.Quit },
+		Handler:     func(m *Model, args string) tea.Cmd { return m.quit() },
 	})
 	registerCommand(&Command{
 		Name:        "agents",

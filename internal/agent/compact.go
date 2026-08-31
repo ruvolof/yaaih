@@ -47,24 +47,28 @@ const compactSummaryPrefix = "[Summary of the earlier part of this conversation,
 func (a *Agent) Compact(ctx context.Context, instructions string) {
 	if !a.turnMu.TryLock() {
 		log.Warn("Compact called while a turn is in progress")
-		defer func() { _ = recover() }() // events channel may be closed during teardown
-		a.events <- ErrorMsg{Err: "agent is still working on the previous turn — please wait for it to finish"}
+		a.publish(ErrorMsg{Err: "agent is still working on the previous turn — please wait for it to finish"})
 		return
 	}
 	defer a.turnMu.Unlock()
 
+	// Compaction occupies the UI exactly as a turn does, so it ends like one:
+	// a single AssistantDoneMsg on every path out, including the ones that
+	// change nothing.
+	turnEnd := AssistantDoneMsg{}
+	defer func() { a.publish(turnEnd) }()
+
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("Compact panic", "value", fmt.Sprintf("%v", r), "stack", string(debug.Stack()))
-			defer func() { _ = recover() }()
-			a.events <- ErrorMsg{Err: fmt.Sprintf("panic while compacting: %v (see logs/)", r)}
+			a.publish(ErrorMsg{Err: fmt.Sprintf("panic while compacting: %v (see logs/)", r)})
 		}
 	}()
 
 	messages := a.snapshotMessages()
 	from, through := history.CompactableSpan(messages)
 	if through-from < history.MinCompactableMessages {
-		a.events <- ErrorMsg{Err: "there is nothing to compact yet — this session is barely past its system prompt"}
+		a.publish(ErrorMsg{Err: "there is nothing to compact yet — this session is barely past its system prompt"})
 		return
 	}
 
@@ -73,15 +77,15 @@ func (a *Agent) Compact(ctx context.Context, instructions string) {
 	if err != nil {
 		if ctx.Err() != nil {
 			log.Info("compaction cancelled by operator")
-			a.events <- AssistantDoneMsg{Cancelled: true}
+			turnEnd.Cancelled = true
 			return
 		}
 		log.Error("compaction failed", "err", err)
-		a.events <- ErrorMsg{Err: fmt.Sprintf("compaction failed, conversation unchanged: %v", err)}
+		a.publish(ErrorMsg{Err: fmt.Sprintf("compaction failed, conversation unchanged: %v", err)})
 		return
 	}
 	if strings.TrimSpace(summary) == "" {
-		a.events <- ErrorMsg{Err: "the model returned an empty summary — conversation unchanged"}
+		a.publish(ErrorMsg{Err: "the model returned an empty summary — conversation unchanged"})
 		return
 	}
 
@@ -102,14 +106,13 @@ func (a *Agent) Compact(ctx context.Context, instructions string) {
 	// The compacted conversation is what the next request will carry, so the
 	// gauge moves to it now rather than staying blank until the operator sends
 	// something.
-	a.events <- a.statsUpdate(calibration.Apply(after))
-	a.events <- HistoryTrimmedMsg{
+	a.publish(a.statsUpdate(calibration.Apply(after)))
+	a.publish(HistoryTrimmedMsg{
 		DroppedMessages: through - from,
 		BeforeTokens:    calibration.Apply(before),
 		AfterTokens:     calibration.Apply(after),
 		Summarised:      true,
-	}
-	a.events <- AssistantDoneMsg{}
+	})
 }
 
 // summarise runs the one-off model call that reads the span and writes the
@@ -133,7 +136,7 @@ func (a *Agent) summarise(ctx context.Context, span []llm.Message, instructions 
 	}, func(ev llm.StreamEvent) {
 		if ev.DeltaText != "" {
 			streamed.WriteString(ev.DeltaText)
-			a.events <- AssistantDeltaMsg{Text: ev.DeltaText}
+			a.publish(AssistantDeltaMsg{Text: ev.DeltaText})
 		}
 	})
 	if err != nil {

@@ -49,12 +49,12 @@ func (a *Agent) requestMessages(tools []llm.ToolDefinition) ([]llm.Message, hist
 		"budget", a.cfg.Options.MaxContextTokens,
 		"over_budget", stats.OverBudget,
 	)
-	a.events <- HistoryTrimmedMsg{
+	a.publish(HistoryTrimmedMsg{
 		DroppedMessages: stats.DroppedMessages,
 		ShrunkResults:   stats.ShrunkResults,
 		BeforeTokens:    calibration.Apply(stats.BeforeTokens),
 		AfterTokens:     calibration.Apply(stats.AfterTokens),
-	}
+	})
 	return windowed, stats
 }
 

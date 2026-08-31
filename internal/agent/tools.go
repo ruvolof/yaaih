@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -57,8 +58,14 @@ func capabilitySet(caps []string) map[string]struct{} {
 	return granted
 }
 
-// Definitions returns the tool definitions in stable order, filtered by the
-// agent's declared capabilities (no capability tag means always exposed).
+// Definitions returns the tool definitions by name, filtered by the agent's
+// declared capabilities (no capability tag means always exposed).
+//
+// The order is sorted rather than whatever the map yields, because it is part
+// of every request: providers that cache the tokenised prefix of a prompt see
+// a reordered tool list as a different prompt, so a random order re-pays the
+// full price of the system prompt and the tool definitions on every iteration
+// of every turn.
 func (r *Registry) Definitions(caps []string) []llm.ToolDefinition {
 	granted := capabilitySet(caps)
 	r.mu.RLock()
@@ -70,6 +77,9 @@ func (r *Registry) Definitions(caps []string) []llm.ToolDefinition {
 		}
 		out = append(out, t.Def)
 	}
+	slices.SortFunc(out, func(a, b llm.ToolDefinition) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 	return out
 }
 

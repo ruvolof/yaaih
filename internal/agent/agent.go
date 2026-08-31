@@ -83,7 +83,15 @@ type Agent struct {
 	seq         int64
 	sessionsDir string
 
-	events chan Event
+	// events carries the agent's output to the TUI. Everything that writes to
+	// it goes through publish, which holds eventsMu in read mode; Close takes
+	// it in write mode, so the channel is never closed underneath a publisher.
+	// closing is shut first, releasing publishers that are blocked on a channel
+	// nobody reads any more — a turn outlives the UI that was watching it.
+	events       chan Event
+	eventsMu     sync.RWMutex
+	closing      chan struct{}
+	eventsClosed bool
 }
 
 // New builds an Agent. When seed is non-empty it is used as the starting
@@ -121,6 +129,7 @@ func New(
 		writer:      writer,
 		sessionsDir: sessionsDir,
 		events:      make(chan Event, 32),
+		closing:     make(chan struct{}),
 		messages:    msgs,
 	}
 	if len(seed) > 0 {
@@ -134,7 +143,7 @@ func New(
 	go func() {
 		defer logging.Recover("agent.gatekeeper-forwarder")
 		for req := range gate.Requests() {
-			a.events <- ApprovalRequestMsg{Request: req}
+			a.publish(ApprovalRequestMsg{Request: req})
 		}
 	}()
 	return a
@@ -142,6 +151,22 @@ func New(
 
 // Events is the read end of the event channel. Closed when the agent stops.
 func (a *Agent) Events() <-chan Event { return a.events }
+
+// publish hands one event to whoever is reading the event stream. It is the
+// only writer of a.events, and it is a no-op once the agent has been closed:
+// a turn can outlive the UI that started it, and it must be able to unwind
+// without a reader and without a channel to publish to.
+func (a *Agent) publish(ev Event) {
+	a.eventsMu.RLock()
+	defer a.eventsMu.RUnlock()
+	if a.eventsClosed {
+		return
+	}
+	select {
+	case a.events <- ev:
+	case <-a.closing:
+	}
+}
 
 // Registry exposes the tool registry so callers can inject additional tools
 // (e.g. script tools) before the turn loop starts.
@@ -154,10 +179,20 @@ func (a *Agent) History() []llm.Message { return a.snapshotMessages() }
 
 // CurrentSession returns the active session id, or "" when persistence is off.
 func (a *Agent) CurrentSession() session.ID {
-	if a.writer == nil {
+	writer := a.currentWriter()
+	if writer == nil {
 		return ""
 	}
-	return a.writer.ID()
+	return writer.ID()
+}
+
+// currentWriter reads the session writer under the lock that /new and /resume
+// swap it behind, so a caller never works with a writer that has been retired
+// half way through what it was doing.
+func (a *Agent) currentWriter() *session.Writer {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.writer
 }
 
 // SessionsDir is the directory where this agent's session files are stored.
@@ -169,10 +204,21 @@ func (a *Agent) SessionsDir() string { return a.sessionsDir }
 func (a *Agent) SessionStats() governor.Stats { return a.gov.Snapshot() }
 func (a *Agent) GlobalStats() governor.Stats  { return a.globGov.Snapshot() }
 
+// errTurnInFlight is what the session-switching operations report rather than
+// waiting for the turn: they are called from the UI thread, and that thread is
+// also the one draining the events the turn is publishing.
+var errTurnInFlight = errors.New("a turn is still running — stop it or wait for it to finish")
+
 // NewSession finalises the current session and starts a fresh, empty one
-// seeded only with the system prompt. Returns the new session id. Callers must
-// ensure no turn is in flight.
+// seeded only with the system prompt. Returns the new session id. Refused
+// while a turn is in flight: it would replace the conversation the turn is
+// writing into.
 func (a *Agent) NewSession() (session.ID, error) {
+	if !a.turnMu.TryLock() {
+		return "", errTurnInFlight
+	}
+	defer a.turnMu.Unlock()
+
 	id := session.NewID()
 	w, err := session.NewWriter(a.sessionsDir, a.headerFor(id))
 	if err != nil {
@@ -186,11 +232,16 @@ func (a *Agent) NewSession() (session.ID, error) {
 
 // ResumeSession finalises the current session and loads the one named by id,
 // replacing the conversation. Returns the loaded history for the UI to render.
-// Callers must ensure no turn is in flight.
+// Refused while a turn is in flight, for the same reason as NewSession.
 func (a *Agent) ResumeSession(id session.ID) ([]llm.Message, error) {
 	if err := session.ValidateID(id); err != nil {
 		return nil, err
 	}
+	if !a.turnMu.TryLock() {
+		return nil, errTurnInFlight
+	}
+	defer a.turnMu.Unlock()
+
 	_, msgs, usage, err := session.Load(a.sessionsDir, id)
 	if err != nil {
 		return nil, err
@@ -211,10 +262,11 @@ func (a *Agent) ResumeSession(id session.ID) ([]llm.Message, error) {
 // RenameSession renames the active session file, keeping it active. Returns an
 // error if there is no active session.
 func (a *Agent) RenameSession(newID session.ID) error {
-	if a.writer == nil {
+	writer := a.currentWriter()
+	if writer == nil {
 		return errors.New("no active session to rename")
 	}
-	if err := a.writer.Rename(a.sessionsDir, newID); err != nil {
+	if err := writer.Rename(a.sessionsDir, newID); err != nil {
 		return err
 	}
 	log.Info("renamed session", "id", newID)
@@ -235,11 +287,16 @@ func (a *Agent) headerFor(id session.ID) session.Header {
 // closeWriter finalises the current session writer (if any) with the given
 // reason and detaches it.
 func (a *Agent) closeWriter(reason string) {
-	if a.writer != nil {
-		if err := a.writer.Close(reason); err != nil {
-			log.Warn("session close failed", "err", err)
-		}
-		a.writer = nil
+	a.mu.Lock()
+	writer := a.writer
+	a.writer = nil
+	a.mu.Unlock()
+
+	if writer == nil {
+		return
+	}
+	if err := writer.Close(reason); err != nil {
+		log.Warn("session close failed", "err", err)
 	}
 }
 
@@ -272,13 +329,31 @@ func (a *Agent) resetConversation(w *session.Writer, seed []llm.Message) {
 }
 
 // Close releases the event channel and finalises the session file. Tool
-// resources are owned by main(). Closing the gatekeeper first stops the
+// resources are owned by main(). The gatekeeper is closed too, which stops the
 // forwarder goroutine so it does not leak across agent switches.
+//
+// A turn in flight is waited out rather than torn through: it still owns the
+// tail of the transcript, and closing the event channel underneath it would
+// leave it publishing into a channel that no longer exists. Shutting closing
+// first is what lets it get that far — by now nothing is reading the events it
+// publishes on the way out, so without that it would block on a full channel
+// and never release the turn.
 func (a *Agent) Close() {
+	close(a.closing)
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+
 	a.gate.Close()
+
+	a.eventsMu.Lock()
+	a.eventsClosed = true
 	close(a.events)
-	if a.writer != nil {
-		if err := a.writer.Close("clean"); err != nil {
+	a.eventsMu.Unlock()
+
+	// The writer stays attached: the session it wrote is still the one the
+	// agent belongs to, and callers ask for its id after teardown.
+	if writer := a.currentWriter(); writer != nil {
+		if err := writer.Close("clean"); err != nil {
 			log.Warn("session close failed", "err", err)
 		}
 	}
@@ -300,11 +375,12 @@ func (a *Agent) recordUsage(m llm.Message, usage *session.Usage) {
 // persist writes one message to the session file, assigning the next sequence
 // number. No-op when persistence is disabled.
 func (a *Agent) persist(m llm.Message, usage *session.Usage) {
-	if a.writer == nil {
+	writer := a.currentWriter()
+	if writer == nil {
 		return
 	}
 	seq := int(atomic.AddInt64(&a.seq, 1))
-	err := a.writer.Append(session.Entry{
+	err := writer.Append(session.Entry{
 		Seq:        seq,
 		Role:       string(m.Role),
 		Content:    m.Content,
@@ -331,19 +407,25 @@ func (a *Agent) messageCount() int {
 //
 // Only one turn runs at a time per Agent. If Send is invoked while a previous
 // turn is still in flight, the second call returns immediately with a "busy"
-// ErrorMsg and does not touch the conversation history.
+// ErrorMsg and does not touch the conversation history. That rejection is the
+// one thing that does not end a turn — the first one is still running.
 func (a *Agent) Send(ctx context.Context, userText string) {
 	if !a.turnMu.TryLock() {
 		log.Warn("Send called while another turn is in progress",
 			"user_msg_len", len(userText),
 		)
-		// Best-effort: report back to the UI without blocking. The events
-		// channel may be closed during teardown.
-		defer func() { _ = recover() }()
-		a.events <- ErrorMsg{Err: "agent is still working on the previous turn — please wait for it to finish"}
+		a.publish(ErrorMsg{Err: "agent is still working on the previous turn — please wait for it to finish"})
 		return
 	}
 	defer a.turnMu.Unlock()
+
+	// A turn starts here and ends with exactly one AssistantDoneMsg, on every
+	// path out — the UI shows itself as working in between, so a return that
+	// skips it leaves the UI waiting on a turn that is already over. Paths that
+	// end early say why with an ErrorMsg first; that event reports, it does not
+	// end anything.
+	turnEnd := AssistantDoneMsg{}
+	defer func() { a.publish(turnEnd) }()
 
 	// Send is invoked from a bubbletea Cmd goroutine; without an explicit
 	// recover, panics here are swallowed by bubbletea's own catch and the
@@ -355,8 +437,7 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 				"value", fmt.Sprintf("%v", r),
 				"stack", string(debug.Stack()),
 			)
-			defer func() { _ = recover() }() // events channel may be closed during teardown
-			a.events <- ErrorMsg{Err: fmt.Sprintf("panic in agent: %v (see logs/)", r)}
+			a.publish(ErrorMsg{Err: fmt.Sprintf("panic in agent: %v (see logs/)", r)})
 		}
 	}()
 
@@ -370,7 +451,7 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 
 	for iter := 0; iter < maxIter; iter++ {
 		if ctx.Err() != nil {
-			a.endCancelled(nil)
+			a.endCancelled(&turnEnd, nil)
 			return
 		}
 		log.Debug("iteration", "n", iter+1, "max", maxIter)
@@ -385,9 +466,9 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 				"fixed_tokens", contextStats.FixedTokens,
 				"budget", a.cfg.Options.MaxContextTokens,
 			)
-			a.events <- ErrorMsg{Err: fmt.Sprintf(
+			a.publish(ErrorMsg{Err: fmt.Sprintf(
 				"this turn no longer fits the %d-token context budget (the system prompt and tool definitions alone cost about %d) — /compact it, raise options.max_context_tokens, or start a new session",
-				a.cfg.Options.MaxContextTokens, a.calibratedTokens(contextStats.FixedTokens))}
+				a.cfg.Options.MaxContextTokens, a.calibratedTokens(contextStats.FixedTokens))})
 			return
 		}
 		req := &llm.ChatRequest{
@@ -413,11 +494,11 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 				if streamed != "" {
 					a.record(llm.Message{Role: llm.RoleAssistant, Content: streamed})
 				}
-				a.endCancelled(nil)
+				a.endCancelled(&turnEnd, nil)
 				return
 			}
 			log.Error("LLM call failed", "err", err, "iter", iter+1)
-			a.events <- ErrorMsg{Err: fmt.Sprintf("llm error: %v", err)}
+			a.publish(ErrorMsg{Err: fmt.Sprintf("llm error: %v", err)})
 			return
 		}
 		// Record usage into both the session-scoped and run-scoped governors.
@@ -428,7 +509,7 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 			a.globGov.AddCost(resp.Usage.Cost)
 		}
 		a.calibrate(contextStats.AfterTokens, resp.Usage.InputTokens)
-		a.events <- a.statsUpdate(a.promptTokens(contextStats, resp.Usage.InputTokens))
+		a.publish(a.statsUpdate(a.promptTokens(contextStats, resp.Usage.InputTokens)))
 
 		// Persist the assistant message with the usage that produced it, so the
 		// session's cumulative cost can be restored on resume.
@@ -443,7 +524,7 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 			CostAvailable: resp.Usage.CostAvailable,
 		})
 
-		a.events <- AssistantMessageMsg{}
+		a.publish(AssistantMessageMsg{})
 
 		// If there are no tool calls, the turn is over.
 		if len(resp.ToolCalls) == 0 {
@@ -455,14 +536,13 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 			if isEmptyGlitch(resp) {
 				log.Warn("LLM kept returning empty completions after retries",
 					"iter", iter+1)
-				a.events <- ErrorMsg{Err: "model returned an empty response — try asking again"}
+				a.publish(ErrorMsg{Err: "model returned an empty response — try asking again"})
 			} else {
 				log.Info("turn done (no tool calls)",
 					"iter", iter+1,
 					"assistant_len", len(resp.Content),
 				)
 			}
-			a.events <- AssistantDoneMsg{}
 			return
 		}
 
@@ -471,10 +551,10 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 		// Execute tool calls and append their results.
 		for idx, tc := range resp.ToolCalls {
 			if ctx.Err() != nil {
-				a.endCancelled(resp.ToolCalls[idx:])
+				a.endCancelled(&turnEnd, resp.ToolCalls[idx:])
 				return
 			}
-			a.events <- ToolCallStartMsg{Name: tc.Name, Args: tc.Arguments}
+			a.publish(ToolCallStartMsg{Name: tc.Name, Args: tc.Arguments})
 			log.Info("tool call",
 				"name", tc.Name,
 				"id", tc.ID,
@@ -485,7 +565,7 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 			if !ok {
 				result := fmt.Sprintf("error: unknown tool %q", tc.Name)
 				log.Warn("unknown tool requested", "name", tc.Name, "capabilities", a.cfg.Capabilities)
-				a.events <- ToolCallResultMsg{Name: tc.Name, Result: "", Err: result}
+				a.publish(ToolCallResultMsg{Name: tc.Name, Result: "", Err: result})
 				a.appendToolResult(tc.ID, tc.Name, result)
 				continue
 			}
@@ -494,11 +574,11 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 				decision, err := a.gate.Request(ctx, tc.Name, prettyJSON(tc.Arguments))
 				if err != nil {
 					if ctx.Err() != nil {
-						a.endCancelled(resp.ToolCalls[idx:])
+						a.endCancelled(&turnEnd, resp.ToolCalls[idx:])
 						return
 					}
 					log.Error("gatekeeper failed", "tool", tc.Name, "err", err)
-					a.events <- ErrorMsg{Err: fmt.Sprintf("gatekeeper: %v", err)}
+					a.publish(ErrorMsg{Err: fmt.Sprintf("gatekeeper: %v", err)})
 					return
 				}
 				switch decision {
@@ -507,13 +587,13 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 				case ApprovalDeny:
 					log.Info("tool denied by operator", "tool", tc.Name)
 					msg := "denied by operator"
-					a.events <- ToolCallResultMsg{Name: tc.Name, Err: msg}
+					a.publish(ToolCallResultMsg{Name: tc.Name, Err: msg})
 					a.appendToolResult(tc.ID, tc.Name, "error: "+msg)
 					continue
 				case ApprovalCancel:
 					log.Info("turn cancelled by operator at tool call", "tool", tc.Name)
-					a.events <- ToolCallResultMsg{Name: tc.Name, Err: "cancelled by operator"}
-					a.endCancelled(resp.ToolCalls[idx:])
+					a.publish(ToolCallResultMsg{Name: tc.Name, Err: "cancelled by operator"})
+					a.endCancelled(&turnEnd, resp.ToolCalls[idx:])
 					return
 				}
 			}
@@ -523,8 +603,8 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 			elapsed := time.Since(toolStart)
 			if err != nil {
 				if ctx.Err() != nil {
-					a.events <- ToolCallResultMsg{Name: tc.Name, Err: "cancelled by operator"}
-					a.endCancelled(resp.ToolCalls[idx:])
+					a.publish(ToolCallResultMsg{Name: tc.Name, Err: "cancelled by operator"})
+					a.endCancelled(&turnEnd, resp.ToolCalls[idx:])
 					return
 				}
 				log.Error("tool failed",
@@ -534,9 +614,9 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 				)
 				var te *executor.TimeoutError
 				if errors.As(err, &te) {
-					a.events <- TimeoutMsg{Command: te.Command, Message: te.Message}
+					a.publish(TimeoutMsg{Command: te.Command, Message: te.Message})
 				}
-				a.events <- ToolCallResultMsg{Name: tc.Name, Result: result, Err: err.Error()}
+				a.publish(ToolCallResultMsg{Name: tc.Name, Result: result, Err: err.Error()})
 				a.appendToolResult(tc.ID, tc.Name, "error: "+err.Error()+"\n"+result)
 				continue
 			}
@@ -545,14 +625,14 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 				"result_bytes", len(result),
 				"elapsed_ms", elapsed.Milliseconds(),
 			)
-			a.events <- ToolCallResultMsg{Name: tc.Name, Result: result}
+			a.publish(ToolCallResultMsg{Name: tc.Name, Result: result})
 			a.appendToolResult(tc.ID, tc.Name, result)
 		}
 		// Loop back: send tool results to the model for the next turn.
 	}
 
 	log.Warn("max tool iterations reached", "max", maxIter)
-	a.events <- ErrorMsg{Err: fmt.Sprintf("max tool iterations (%d) reached", maxIter)}
+	a.publish(ErrorMsg{Err: fmt.Sprintf("max tool iterations (%d) reached", maxIter)})
 }
 
 // cancelledToolResult answers a tool call the operator stopped before it could
@@ -565,12 +645,15 @@ const cancelledToolResult = "error: cancelled by operator. The user has stopped 
 // gets a synthetic result first: an assistant message whose tool_calls have no
 // matching tool replies is rejected by most providers, so leaving one dangling
 // would break not just this turn but every turn after it.
-func (a *Agent) endCancelled(unanswered []llm.ToolCall) {
+//
+// It marks the turn's end rather than publishing it: Send emits that on its way
+// out, whichever path it leaves by.
+func (a *Agent) endCancelled(turnEnd *AssistantDoneMsg, unanswered []llm.ToolCall) {
 	for _, tc := range unanswered {
 		a.appendToolResult(tc.ID, tc.Name, cancelledToolResult)
 	}
 	log.Info("turn cancelled", "unanswered_tool_calls", len(unanswered))
-	a.events <- AssistantDoneMsg{Cancelled: true}
+	turnEnd.Cancelled = true
 }
 
 // maxEmptyLLMRetries is the number of times we'll re-issue the same
@@ -609,7 +692,7 @@ func (a *Agent) callLLMWithRetry(ctx context.Context, req *llm.ChatRequest, iter
 	cb := func(ev llm.StreamEvent) {
 		if ev.DeltaText != "" {
 			content.WriteString(ev.DeltaText)
-			a.events <- AssistantDeltaMsg{Text: ev.DeltaText}
+			a.publish(AssistantDeltaMsg{Text: ev.DeltaText})
 		}
 	}
 

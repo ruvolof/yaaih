@@ -97,7 +97,7 @@ type Model struct {
 	userScrolled bool
 
 	// busy is true while a turn is in flight (between the user pressing
-	// Enter and AssistantDoneMsg / ErrorMsg). busyFrame advances every
+	// Enter and the AssistantDoneMsg that ends it). busyFrame advances every
 	// busyTickInterval via busyTickMsg and drives the dot animation in
 	// renderStatus.
 	busy      bool
@@ -323,7 +323,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.String() {
 		case "ctrl+c", "ctrl+d":
-			return m, tea.Quit
+			return m, m.quit()
 		case "esc":
 			// Stop the running turn. The agent unwinds at its next
 			// cancellation point and reports back with a cancelled
@@ -474,8 +474,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, waitForEvent(m.ag.Events()))
 
 	case agent.ErrorMsg:
+		// Reporting only. What ends a turn — and with it the busy indicator and
+		// the stop key — is AssistantDoneMsg, which the agent emits on every
+		// path out including the ones that failed. An error that arrives while
+		// a turn is running (a rejected second message) must leave the running
+		// turn's UI alone.
 		m.appendLine(styleErr.Render("error: " + msg.Err))
-		m.busy = false
 		cmds = append(cmds, waitForEvent(m.ag.Events()))
 
 	case toastExpiredMsg:
@@ -659,6 +663,17 @@ func (m *Model) resetChat() {
 	m.lastAssistant = ""
 	m.userScrolled = false
 	m.renderChat()
+}
+
+// quit leaves the harness, stopping a turn that is still running on the way
+// out. Teardown waits for the turn to unwind before it closes the session file
+// and the sandbox, so a turn left running is a turn the operator waits for.
+func (m *Model) quit() tea.Cmd {
+	if m.busy && m.cancelTurn != nil {
+		log.Info("quitting with a turn in flight, cancelling it")
+		m.cancelTurn()
+	}
+	return tea.Quit
 }
 
 // refuseIfBusy reports whether a turn is in flight and, if so, prints a notice
