@@ -449,3 +449,91 @@ func TestLoadSurvivesAnImpossibleCompactionRange(t *testing.T) {
 		t.Errorf("loaded %+v, want the system prompt and the clamped summary", msgs)
 	}
 }
+
+// A session resumed under an edited agent.md carried on with the new prompt, so
+// that is the prompt it has to reopen with — and a compaction written after the
+// change still indexes the conversation the agent was holding.
+func TestLoadReplaysASystemPromptChange(t *testing.T) {
+	base := t.TempDir()
+	id := ID("20260605-101122-prmA")
+	w, err := NewWriter(base, testHeader(id))
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	appendMessages(t, w, []llm.Message{
+		{Role: llm.RoleSystem, Content: "You are a DevOps Agent."},
+		{Role: llm.RoleUser, Content: "deploy staging"},
+		{Role: llm.RoleAssistant, Content: "Deployed."},
+	})
+	if err := w.AppendSystemPrompt(SystemPrompt{Seq: 4, Content: "You are a careful DevOps Agent."}); err != nil {
+		t.Fatalf("AppendSystemPrompt: %v", err)
+	}
+	if err := w.Append(Entry{Seq: 5, Role: string(llm.RoleUser), Content: "now production"}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := w.AppendCompaction(Compaction{
+		Seq: 6, From: 1, Through: 3, Role: string(llm.RoleSystem), Content: "Staging was deployed.",
+	}); err != nil {
+		t.Fatalf("AppendCompaction: %v", err)
+	}
+	if err := w.Close("clean"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	_, msgs, _, err := Load(base, id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []llm.Message{
+		{Role: llm.RoleSystem, Content: "You are a careful DevOps Agent."},
+		{Role: llm.RoleSystem, Content: "Staging was deployed."},
+		{Role: llm.RoleUser, Content: "now production"},
+	}
+	if len(msgs) != len(want) {
+		t.Fatalf("loaded %d messages, want %d: %+v", len(msgs), len(want), msgs)
+	}
+	for i := range want {
+		if msgs[i].Role != want[i].Role || msgs[i].Content != want[i].Content {
+			t.Errorf("message %d = %+v, want %+v", i, msgs[i], want[i])
+		}
+	}
+}
+
+func TestWithSystemPrompt(t *testing.T) {
+	user := llm.Message{Role: llm.RoleUser, Content: "hello"}
+	system := func(prompt string) llm.Message { return llm.Message{Role: llm.RoleSystem, Content: prompt} }
+
+	cases := []struct {
+		name        string
+		msgs        []llm.Message
+		want        []llm.Message
+		wantChanged bool
+	}{
+		{"same prompt", []llm.Message{system("current"), user}, []llm.Message{system("current"), user}, false},
+		{"edited prompt", []llm.Message{system("old"), user}, []llm.Message{system("current"), user}, true},
+		{"no system message", []llm.Message{user}, []llm.Message{system("current"), user}, true},
+		{"empty conversation", nil, []llm.Message{system("current")}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			original := append([]llm.Message(nil), tc.msgs...)
+			got, changed := WithSystemPrompt(tc.msgs, "current")
+			if changed != tc.wantChanged {
+				t.Errorf("changed = %v, want %v", changed, tc.wantChanged)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %+v, want %+v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i].Role != tc.want[i].Role || got[i].Content != tc.want[i].Content {
+					t.Errorf("message %d = %+v, want %+v", i, got[i], tc.want[i])
+				}
+			}
+			for i := range original {
+				if tc.msgs[i].Content != original[i].Content {
+					t.Errorf("the input was modified at %d: %+v", i, tc.msgs[i])
+				}
+			}
+		})
+	}
+}

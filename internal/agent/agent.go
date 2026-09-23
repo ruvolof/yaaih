@@ -95,10 +95,10 @@ type Agent struct {
 }
 
 // New builds an Agent. When seed is non-empty it is used as the starting
-// conversation (the resume path; seed already includes the system message and
-// is assumed to already be on disk); otherwise the agent is seeded with the
-// system prompt and that message is persisted as the first entry. writer may
-// be nil to disable persistence.
+// conversation (the resume path; seed is assumed to already be on disk), opened
+// with the system prompt cfg carries now rather than the one seed was written
+// with; otherwise the agent is seeded with the system prompt and that message
+// is persisted as the first entry. writer may be nil to disable persistence.
 func New(
 	cfg *config.Config,
 	prov llm.Provider,
@@ -111,11 +111,10 @@ func New(
 	seed []llm.Message,
 	sessionsDir string,
 ) *Agent {
-	var msgs []llm.Message
+	msgs := []llm.Message{{Role: llm.RoleSystem, Content: cfg.SystemPrompt}}
+	promptChanged := false
 	if len(seed) > 0 {
-		msgs = append(msgs, seed...)
-	} else {
-		msgs = []llm.Message{{Role: llm.RoleSystem, Content: cfg.SystemPrompt}}
+		msgs, promptChanged = withCurrentSystemPrompt(seed, cfg.SystemPrompt)
 	}
 	a := &Agent{
 		cfg:         cfg,
@@ -135,6 +134,9 @@ func New(
 	if len(seed) > 0 {
 		// Resumed: the seed is already on disk; continue numbering after it.
 		a.seq = int64(len(seed))
+		if promptChanged {
+			a.persistSystemPrompt()
+		}
 	} else {
 		// Fresh: persist the system message as seq 1.
 		a.persist(msgs[0], nil)
@@ -256,7 +258,7 @@ func (a *Agent) ResumeSession(id session.ID) ([]llm.Message, error) {
 	// it). Only the session governor — the run total is not rewound.
 	a.gov.Seed(usage.InputTokens, usage.OutputTokens, usage.Cost, usage.CostAvailable)
 	log.Info("resumed session", "id", id, "messages", len(msgs))
-	return msgs, nil
+	return a.snapshotMessages(), nil
 }
 
 // RenameSession renames the active session file, keeping it active. Returns an
@@ -302,12 +304,13 @@ func (a *Agent) closeWriter(reason string) {
 
 // resetConversation replaces the conversation history, the session writer, and
 // the sequence counter. With an empty seed it starts fresh from the system
-// prompt and persists it as the first entry; otherwise it adopts seed as-is
-// (already on disk) and continues numbering after it.
+// prompt and persists it as the first entry; otherwise it adopts seed (already
+// on disk) under the current system prompt and continues numbering after it.
 func (a *Agent) resetConversation(w *session.Writer, seed []llm.Message) {
+	promptChanged := false
 	a.mu.Lock()
 	if len(seed) > 0 {
-		a.messages = append([]llm.Message(nil), seed...)
+		a.messages, promptChanged = withCurrentSystemPrompt(seed, a.cfg.SystemPrompt)
 		atomic.StoreInt64(&a.seq, int64(len(seed)))
 	} else {
 		a.messages = []llm.Message{{Role: llm.RoleSystem, Content: a.cfg.SystemPrompt}}
@@ -325,6 +328,38 @@ func (a *Agent) resetConversation(w *session.Writer, seed []llm.Message) {
 	a.gov.Reset()
 	if len(seed) == 0 {
 		a.persist(a.messages[0], nil) // seq -> 1
+	}
+	if promptChanged {
+		a.persistSystemPrompt()
+	}
+}
+
+// withCurrentSystemPrompt opens a resumed conversation with the system prompt
+// the agent is configured with now. A transcript keeps the prompt it was
+// written with, but agent.md and its skills are what gets edited between runs,
+// and resuming a session is how an edit gets tried out.
+func withCurrentSystemPrompt(seed []llm.Message, prompt string) ([]llm.Message, bool) {
+	messages, changed := session.WithSystemPrompt(seed, prompt)
+	if changed {
+		log.Info("system prompt changed since the session was written, resuming with the current one",
+			"prompt_bytes", len(prompt),
+		)
+	}
+	return messages, changed
+}
+
+// persistSystemPrompt records in the session file that the conversation now
+// opens with the configured system prompt, so the transcript replays as what
+// was actually sent from here on.
+func (a *Agent) persistSystemPrompt() {
+	writer := a.currentWriter()
+	if writer == nil {
+		return
+	}
+	seq := int(atomic.AddInt64(&a.seq, 1))
+	err := writer.AppendSystemPrompt(session.SystemPrompt{Seq: seq, Content: a.cfg.SystemPrompt})
+	if err != nil {
+		log.Warn("session system prompt append failed", "err", err, "seq", seq)
 	}
 }
 

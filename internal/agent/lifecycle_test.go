@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ruvolof/aibitat-harness-go/internal/governor"
 	"github.com/ruvolof/aibitat-harness-go/internal/llm"
 	"github.com/ruvolof/aibitat-harness-go/internal/session"
 )
@@ -190,5 +191,113 @@ func TestRenameSessionWithoutAnActiveSessionFails(t *testing.T) {
 	}
 	if id := agent.CurrentSession(); id != "" {
 		t.Errorf("CurrentSession = %q, want empty with persistence disabled", id)
+	}
+}
+
+// promptChangesOnDisk counts the lines in a transcript that record a switch to a
+// different system prompt.
+func promptChangesOnDisk(t *testing.T, sessionsDir string, id session.ID) int {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(sessionsDir, string(id)+".jsonl"))
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	return strings.Count(string(raw), `"type":"system_prompt"`)
+}
+
+// Editing agent.md and resuming a session to try the edit out is the loop the
+// prompt is developed in, so /resume has to send the prompt as it is now — and
+// the transcript has to say so, or it records a conversation that was never
+// sent.
+func TestResumeSessionSendsTheCurrentSystemPrompt(t *testing.T) {
+	provider := &stubProvider{responses: []*llm.ChatResponse{
+		textResponse("first answer"),
+		textResponse("second answer"),
+		textResponse("third answer"),
+	}}
+	agent, sessionsDir, firstID := newPersistedTestAgent(t, provider)
+	const edited = "you are a test agent, edited"
+
+	collectEvents(t, agent, func() {
+		agent.Send(context.Background(), "remember the number 7")
+		if _, err := agent.NewSession(); err != nil {
+			t.Fatalf("NewSession: %v", err)
+		}
+		agent.cfg.SystemPrompt = edited
+		resumed, err := agent.ResumeSession(firstID)
+		if err != nil {
+			t.Fatalf("ResumeSession: %v", err)
+		}
+		if resumed[0].Content != edited {
+			t.Errorf("resumed history opens with %q, want the edited prompt", resumed[0].Content)
+		}
+		agent.Send(context.Background(), "what was the number?")
+		if _, err := agent.ResumeSession(firstID); err != nil {
+			t.Fatalf("second ResumeSession: %v", err)
+		}
+		agent.Send(context.Background(), "and now?")
+	})
+
+	for i := 1; i <= 2; i++ {
+		request := provider.request(i)
+		if request == nil {
+			t.Fatalf("request %d was never sent", i)
+		}
+		if got := request.Messages[0].Content; got != edited {
+			t.Errorf("request %d was sent with system prompt %q, want %q", i, got, edited)
+		}
+	}
+	if !strings.Contains(contentsOf(provider.request(1).Messages), "number 7") {
+		t.Error("the resumed request lost the conversation it resumed")
+	}
+
+	_, onDisk, _, err := session.Load(sessionsDir, firstID)
+	if err != nil {
+		t.Fatalf("load the resumed session: %v", err)
+	}
+	if onDisk[0].Content != edited {
+		t.Errorf("the transcript reopens with %q, want the prompt that was actually sent", onDisk[0].Content)
+	}
+	if got := promptChangesOnDisk(t, sessionsDir, firstID); got != 1 {
+		t.Errorf("the transcript records %d prompt changes, want 1 — resuming under an unchanged prompt changes nothing", got)
+	}
+}
+
+// --resume goes through New with the loaded transcript as its seed rather than
+// through ResumeSession, and has to land in the same place.
+func TestNewFromASeedSendsTheCurrentSystemPrompt(t *testing.T) {
+	provider := &stubProvider{responses: []*llm.ChatResponse{
+		textResponse("first answer"),
+		textResponse("second answer"),
+	}}
+	original, sessionsDir, id := newPersistedTestAgent(t, provider)
+	collectEvents(t, original, func() {
+		original.Send(context.Background(), "remember the number 7")
+	})
+
+	_, seed, _, err := session.Load(sessionsDir, id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	writer, err := session.OpenForAppend(sessionsDir, id)
+	if err != nil {
+		t.Fatalf("OpenForAppend: %v", err)
+	}
+	cfg := *original.cfg
+	cfg.SystemPrompt = "you are a test agent, edited"
+	resumed := New(&cfg, provider, governor.New(cfg.Model), governor.New(cfg.Model),
+		&stubRunner{}, nil, NewGatekeeper(false), writer, seed, sessionsDir)
+
+	if got := resumed.History()[0].Content; got != cfg.SystemPrompt {
+		t.Errorf("resumed history opens with %q, want the edited prompt", got)
+	}
+	collectEvents(t, resumed, func() {
+		resumed.Send(context.Background(), "what was the number?")
+	})
+	if got := provider.request(1).Messages[0].Content; got != cfg.SystemPrompt {
+		t.Errorf("the resumed request was sent with system prompt %q, want %q", got, cfg.SystemPrompt)
+	}
+	if got := promptChangesOnDisk(t, sessionsDir, id); got != 1 {
+		t.Errorf("the transcript records %d prompt changes, want 1", got)
 	}
 }

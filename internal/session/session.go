@@ -91,6 +91,16 @@ type Compaction struct {
 	Content string `json:"content"`
 }
 
+// SystemPrompt records that a resumed session carried on under a different
+// system prompt from the one it was written with — agent.md or the skills it
+// pulls in were edited in between. Every request after this line was sent with
+// Content in place of the prompt the transcript opens with.
+type SystemPrompt struct {
+	Type    string `json:"type"` // always "system_prompt"
+	Seq     int    `json:"seq"`
+	Content string `json:"content"`
+}
+
 // footer is the last line of a cleanly-closed session file.
 type footer struct {
 	Type   string `json:"type"` // always "footer"
@@ -194,6 +204,17 @@ func (w *Writer) AppendCompaction(c Compaction) error {
 		return fmt.Errorf("session: writer closed")
 	}
 	return w.writeLine(c)
+}
+
+// AppendSystemPrompt writes one SystemPrompt line and flushes. Thread-safe.
+func (w *Writer) AppendSystemPrompt(p SystemPrompt) error {
+	p.Type = "system_prompt"
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return fmt.Errorf("session: writer closed")
+	}
+	return w.writeLine(p)
 }
 
 // Close writes a footer with the given reason (clean | signal | crash) and
@@ -360,6 +381,13 @@ func Load(dir string, id ID) (Header, []llm.Message, Usage, error) {
 				continue
 			}
 			msgs = applyCompaction(msgs, c)
+		case "system_prompt":
+			var p SystemPrompt
+			if err := json.Unmarshal(raw, &p); err != nil {
+				log.Warn("session system prompt skipped", "path", path, "line", lineNo, "err", err.Error())
+				continue
+			}
+			msgs, _ = WithSystemPrompt(msgs, p.Content)
 		case "footer":
 			// Diagnostic only; ignored on read.
 		default:
@@ -405,6 +433,25 @@ func applyCompaction(msgs []llm.Message, c Compaction) []llm.Message {
 	out = append(out, msgs[:from]...)
 	out = append(out, summary)
 	return append(out, msgs[through:]...)
+}
+
+// WithSystemPrompt returns msgs opening with prompt as its system message, and
+// whether that differs from what msgs opened with. The leading system message is
+// replaced when there is one and prompt is put in front when there is not. The
+// agent resumes through this and Load replays SystemPrompt lines through it, so
+// the two cannot disagree about the conversation a later compaction's positions
+// index into. The result never shares msgs' backing array.
+func WithSystemPrompt(msgs []llm.Message, prompt string) ([]llm.Message, bool) {
+	system := llm.Message{Role: llm.RoleSystem, Content: prompt}
+	if len(msgs) == 0 || msgs[0].Role != llm.RoleSystem {
+		return append([]llm.Message{system}, msgs...), true
+	}
+	out := append([]llm.Message(nil), msgs...)
+	if out[0].Content == prompt {
+		return out, false
+	}
+	out[0] = system
+	return out, true
 }
 
 // elideDangling drops trailing assistant messages whose tool_calls were never
