@@ -58,6 +58,16 @@ func TestEveryExitPathEndsTheTurnExactlyOnce(t *testing.T) {
 			wantErr: "context budget",
 		},
 		{
+			name: "the session is over its spending limit",
+			build: func(t *testing.T) *Agent {
+				agent := newTestAgent(t, nil, &stubProvider{}, nil)
+				agent.gov.SetLimits(governor.Limits{MaxTokens: 10})
+				agent.gov.Seed(10, 0, 0, false)
+				return agent
+			},
+			wantErr: "limit",
+		},
+		{
 			name: "the iteration cap is reached",
 			build: func(t *testing.T) *Agent {
 				provider := &stubProvider{responses: []*llm.ChatResponse{

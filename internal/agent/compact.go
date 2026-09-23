@@ -72,6 +72,10 @@ func (a *Agent) Compact(ctx context.Context, instructions string) {
 		return
 	}
 
+	if a.refuseOverSpendLimit() {
+		return
+	}
+
 	log.Info("compacting", "messages", through-from, "history_msgs", len(messages))
 	summary, usage, err := a.summarise(ctx, messages[from:through], instructions)
 	if err != nil {

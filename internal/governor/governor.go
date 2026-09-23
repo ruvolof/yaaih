@@ -1,10 +1,12 @@
 // Package governor tracks cumulative token usage and (when available) cost
-// across an agent session. It does not do local tokenisation — usage comes
-// straight from the LLM API response, and cost is only reported when the
-// provider returns it (e.g. OpenRouter). Otherwise the sidebar shows "N/A".
+// across an agent session, and holds the limits that session may not spend
+// past. It does not do local tokenisation — usage comes straight from the LLM
+// API response, and cost is only reported when the provider returns it (e.g.
+// OpenRouter). Otherwise the sidebar shows "N/A".
 package governor
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/ruvolof/aibitat-harness-go/internal/llm"
@@ -12,6 +14,13 @@ import (
 )
 
 var log = logging.For("governor")
+
+// Limits caps what a session may spend. A zero field leaves that dimension
+// unbounded, so the zero value is no limit at all.
+type Limits struct {
+	MaxCostUSD float64
+	MaxTokens  int
+}
 
 // Stats is a snapshot suitable for rendering in the TUI sidebar.
 type Stats struct {
@@ -21,6 +30,7 @@ type Stats struct {
 	TotalTokens       int
 	EstimatedCostUSD  float64
 	CostAvailable     bool
+	Limits            Limits
 }
 
 // Governor accumulates per-turn usage.
@@ -28,6 +38,7 @@ type Governor struct {
 	mu sync.RWMutex
 
 	model         string
+	limits        Limits
 	totalInput    int
 	totalOutput   int
 	totalCostUSD  float64
@@ -36,6 +47,14 @@ type Governor struct {
 
 // New returns an empty Governor for the given model identifier.
 func New(model string) *Governor { return &Governor{model: model} }
+
+// SetLimits sets the spending limits the session is held to. Reset and Seed
+// leave them in place: they belong to the agent, not to one session's totals.
+func (g *Governor) SetLimits(limits Limits) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.limits = limits
+}
 
 // Record adds one turn's usage to the running totals.
 func (g *Governor) Record(usage llm.TokenUsage) {
@@ -102,5 +121,39 @@ func (g *Governor) Snapshot() Stats {
 		TotalTokens:       g.totalInput + g.totalOutput,
 		EstimatedCostUSD:  g.totalCostUSD,
 		CostAvailable:     g.costAvailable,
+		Limits:            g.limits,
 	}
+}
+
+// OverLimit reports the first limit the totals have reached, as an error that
+// names the figures. A cost limit is only ever reached by a reported cost: when
+// the provider reports none, there is nothing to hold it against.
+func (s Stats) OverLimit() error {
+	if s.Limits.MaxCostUSD > 0 && s.CostAvailable && s.EstimatedCostUSD >= s.Limits.MaxCostUSD {
+		return fmt.Errorf("session cost $%.4f has reached the $%.2f limit", s.EstimatedCostUSD, s.Limits.MaxCostUSD)
+	}
+	if s.Limits.MaxTokens > 0 && s.TotalTokens >= s.Limits.MaxTokens {
+		return fmt.Errorf("session tokens %d have reached the %d limit", s.TotalTokens, s.Limits.MaxTokens)
+	}
+	return nil
+}
+
+// LimitUsed is how far the session has gone towards whichever limit it is
+// closest to, as a fraction: 0 with no limits set, 1 or more once one is
+// reached.
+func (s Stats) LimitUsed() float64 {
+	used := 0.0
+	if s.Limits.MaxCostUSD > 0 && s.CostAvailable {
+		used = max(used, s.EstimatedCostUSD/s.Limits.MaxCostUSD)
+	}
+	if s.Limits.MaxTokens > 0 {
+		used = max(used, float64(s.TotalTokens)/float64(s.Limits.MaxTokens))
+	}
+	return used
+}
+
+// CostLimitUnenforced reports a cost limit that cannot be held: one is set, the
+// session has made requests, and none of them came back with a cost.
+func (s Stats) CostLimitUnenforced() bool {
+	return s.Limits.MaxCostUSD > 0 && !s.CostAvailable && s.TotalTokens > 0
 }

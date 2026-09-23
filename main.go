@@ -230,6 +230,8 @@ func buildAgentRuntime(ctx context.Context, agentDir, resumeID string, newSessio
 		"model", cfg.Model,
 		"provider", cfg.Provider.BaseURL,
 		"api_key_set", cfg.APIKey() != "",
+		"max_session_cost_usd", cfg.Provider.MaxSessionCostUSD,
+		"max_session_tokens", cfg.Provider.MaxSessionTokens,
 		"capabilities", cfg.Capabilities,
 		"approval_required", cfg.Safety.ApprovalRequired,
 		"runtime_image", cfg.Runtime.Image,
@@ -259,6 +261,10 @@ func buildAgentRuntime(ctx context.Context, agentDir, resumeID string, newSessio
 	// 2. LLM provider, governor, gatekeeper.
 	prov := llm.NewOpenAICompat(cfg.Provider.BaseURL, cfg.APIKey(), cfg.Model)
 	gov := governor.New(cfg.Model)
+	gov.SetLimits(governor.Limits{
+		MaxCostUSD: cfg.Provider.MaxSessionCostUSD,
+		MaxTokens:  cfg.Provider.MaxSessionTokens,
+	})
 	gate := agent.NewGatekeeper(cfg.Safety.ApprovalRequired)
 
 	// 3. Session persistence: resume a prior transcript or start a new one. When

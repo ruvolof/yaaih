@@ -66,6 +66,72 @@ func TestContextWarningStaysQuietWithoutABudget(t *testing.T) {
 	}
 }
 
+func limitedStats(tokens int, cost float64, costAvailable bool) governor.Stats {
+	return governor.Stats{
+		TotalTokens:      tokens,
+		EstimatedCostUSD: cost,
+		CostAvailable:    costAvailable,
+		Limits:           governor.Limits{MaxCostUSD: 1, MaxTokens: 100_000},
+	}
+}
+
+// A limit reached without warning is a long autonomous run stopping mid-task
+// for no visible reason.
+func TestSpendWarningAppearsOnceThenRearmsForTheNextSession(t *testing.T) {
+	m := &Model{}
+
+	m.noteSpend(limitedStats(10_000, 0.5, true))
+	if body := m.chatBuf.String(); body != "" {
+		t.Fatalf("warned at half the limit: %q", stripANSI(body))
+	}
+
+	m.noteSpend(limitedStats(10_000, 0.85, true))
+	warning := stripANSI(m.chatBuf.String())
+	if !strings.Contains(warning, "85%") || !strings.Contains(warning, "/new") {
+		t.Fatalf("warning = %q, want how close the limit is and what to do about it", warning)
+	}
+
+	m.noteSpend(limitedStats(95_000, 0.9, true))
+	if got := strings.Count(stripANSI(m.chatBuf.String()), "spending limit"); got != 1 {
+		t.Errorf("warned %d times approaching one limit, want 1", got)
+	}
+
+	// /new starts from nothing; that session's approach deserves its own warning.
+	m.noteSpend(limitedStats(0, 0, true))
+	m.noteSpend(limitedStats(90_000, 0.1, true))
+	if got := strings.Count(stripANSI(m.chatBuf.String()), "spending limit"); got != 2 {
+		t.Errorf("warned %d times across two sessions, want 2", got)
+	}
+}
+
+func TestUnenforceableCostLimitIsReportedOnce(t *testing.T) {
+	m := &Model{}
+	m.noteSpend(limitedStats(100, 0, false))
+	m.noteSpend(limitedStats(200, 0, false))
+
+	body := stripANSI(m.chatBuf.String())
+	if got := strings.Count(body, "cannot be enforced"); got != 1 {
+		t.Errorf("warned %d times about an unenforced cost limit, want 1: %q", got, body)
+	}
+}
+
+func TestSidebarShowsSpendAgainstItsLimits(t *testing.T) {
+	m := &Model{sessionStats: limitedStats(12_345, 0.25, true)}
+
+	sidebar := stripANSI(m.renderSidebar())
+	for _, want := range []string{"tot: 12345 / 100k", "$0.2500 / $1.00"} {
+		if !strings.Contains(sidebar, want) {
+			t.Errorf("sidebar is missing %q:\n%s", want, sidebar)
+		}
+	}
+
+	m.sessionStats = governor.Stats{TotalTokens: 12_345}
+	sidebar = stripANSI(m.renderSidebar())
+	if strings.Contains(sidebar, " / ") {
+		t.Errorf("sidebar shows a limit for a session without one:\n%s", sidebar)
+	}
+}
+
 // Streamed text lives below the committed transcript until something commits
 // it. Across a tool call that means narration sinking under the tool traffic it
 // introduced, and staying pinned to the bottom of the view for the rest of the

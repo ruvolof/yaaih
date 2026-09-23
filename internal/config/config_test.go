@@ -257,3 +257,34 @@ func TestContextBudgetAppliesByDefault(t *testing.T) {
 			explicit.Options.MaxContextTokens)
 	}
 }
+
+// Spending limits sit with the provider and model they are spent on. Left out,
+// a session is unbounded, as it was before the limits existed.
+func TestSpendLimitsUnderProvider(t *testing.T) {
+	unset, err := Load(writeAgent(t, t.TempDir(), ""), Overrides{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if unset.Provider.MaxSessionCostUSD != 0 || unset.Provider.MaxSessionTokens != 0 {
+		t.Errorf("limits = $%v / %d tokens, want both unbounded by default",
+			unset.Provider.MaxSessionCostUSD, unset.Provider.MaxSessionTokens)
+	}
+
+	limited, err := Load(writeAgent(t, t.TempDir(),
+		"  max_session_cost_usd: 2.5\n  max_session_tokens: 400000"), Overrides{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if limited.Provider.MaxSessionCostUSD != 2.5 || limited.Provider.MaxSessionTokens != 400_000 {
+		t.Errorf("limits = $%v / %d tokens, want $2.5 / 400000",
+			limited.Provider.MaxSessionCostUSD, limited.Provider.MaxSessionTokens)
+	}
+}
+
+func TestNegativeSpendLimitsAreRejected(t *testing.T) {
+	for _, line := range []string{"  max_session_cost_usd: -1", "  max_session_tokens: -1"} {
+		if _, err := Load(writeAgent(t, t.TempDir(), line), Overrides{}); err == nil {
+			t.Errorf("Load accepted %q, want an error", line)
+		}
+	}
+}

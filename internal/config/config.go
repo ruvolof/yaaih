@@ -75,6 +75,15 @@ type Overrides struct {
 type ProviderCfg struct {
 	BaseURL   string `yaml:"base_url"`
 	APIKeyEnv string `yaml:"api_key_env"`
+
+	// MaxSessionCostUSD and MaxSessionTokens cap what one session may spend.
+	// Once either is reached the agent makes no further model requests in that
+	// session. Tokens count input and output together, which is what is billed:
+	// the conversation is re-sent on every request. The cost cap relies on the
+	// provider reporting cost and holds nothing against one that does not. Zero
+	// leaves the dimension unbounded.
+	MaxSessionCostUSD float64 `yaml:"max_session_cost_usd"`
+	MaxSessionTokens  int     `yaml:"max_session_tokens"`
 }
 
 // RuntimeCfg describes the Docker sandbox in which shell/browser tools execute.
@@ -388,6 +397,12 @@ func (c *Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Provider.BaseURL) == "" {
 		return errors.New("agent.md: `provider.base_url` is required")
+	}
+	if c.Provider.MaxSessionCostUSD < 0 {
+		return errors.New("agent.md: `provider.max_session_cost_usd` cannot be negative (0 means no limit)")
+	}
+	if c.Provider.MaxSessionTokens < 0 {
+		return errors.New("agent.md: `provider.max_session_tokens` cannot be negative (0 means no limit)")
 	}
 	if c.Provider.APIKeyEnv != "" && os.Getenv(c.Provider.APIKeyEnv) == "" {
 		// Not fatal — local providers may legitimately omit auth — but warn.

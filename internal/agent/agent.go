@@ -489,6 +489,12 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 			a.endCancelled(&turnEnd, nil)
 			return
 		}
+		// Checked before each request rather than after each response: here
+		// every tool call the model made has been answered, so the history the
+		// turn leaves behind can still be sent if the limit is raised.
+		if a.refuseOverSpendLimit() {
+			return
+		}
 		log.Debug("iteration", "n", iter+1, "max", maxIter)
 		tools := a.registry.Definitions(a.cfg.Capabilities)
 		messages, contextStats := a.requestMessages(tools)
@@ -689,6 +695,21 @@ func (a *Agent) endCancelled(turnEnd *AssistantDoneMsg, unanswered []llm.ToolCal
 	}
 	log.Info("turn cancelled", "unanswered_tool_calls", len(unanswered))
 	turnEnd.Cancelled = true
+}
+
+// refuseOverSpendLimit reports whether the session has reached one of its
+// spending limits and, if it has, tells the operator why nothing more will be
+// sent. Every path that makes a model request asks it first.
+func (a *Agent) refuseOverSpendLimit() bool {
+	err := a.gov.Snapshot().OverLimit()
+	if err == nil {
+		return false
+	}
+	log.Warn("session spend limit reached, refusing the request", "err", err)
+	a.publish(ErrorMsg{Err: fmt.Sprintf(
+		"%v — nothing more will be sent in this session. /new starts a fresh one; to continue this one, raise the limit under provider: in agent.md and relaunch with --resume",
+		err)})
+	return true
 }
 
 // maxEmptyLLMRetries is the number of times we'll re-issue the same

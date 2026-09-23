@@ -133,6 +133,11 @@ type Model struct {
 	contextBudget int
 	contextWarned bool
 
+	// spendWarned keeps the approaching-the-limit warning to one per session;
+	// costLimitWarned the one about a cost limit the provider cannot enforce.
+	spendWarned     bool
+	costLimitWarned bool
+
 	pendingApproval *agent.ApprovalRequest
 }
 
@@ -461,6 +466,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.globalStats = msg.Global
 		m.cwd = msg.CWD
 		m.noteContextFill(msg.ContextTokens, msg.ContextBudget)
+		m.noteSpend(msg.Session)
 		cmds = append(cmds, waitForEvent(m.ag.Events()))
 
 	case agent.HistoryTrimmedMsg:
@@ -873,12 +879,7 @@ func (m *Model) renderSidebar() string {
 	fmt.Fprintln(&b, styleHeader.Render("Session"))
 	fmt.Fprintf(&b, "in:  %d\n", m.sessionStats.TotalInputTokens)
 	fmt.Fprintf(&b, "out: %d\n", m.sessionStats.TotalOutputTokens)
-	fmt.Fprintf(&b, "tot: %d\n", m.sessionStats.TotalTokens)
-	if m.sessionStats.CostAvailable {
-		fmt.Fprintf(&b, "$%.4f\n", m.sessionStats.EstimatedCostUSD)
-	} else {
-		fmt.Fprintln(&b, styleMuted.Render("$ N/A"))
-	}
+	fmt.Fprint(&b, renderSessionSpend(m.sessionStats))
 	if m.contextBudget > 0 && m.contextTokens > 0 {
 		fmt.Fprintln(&b)
 		fmt.Fprintln(&b, styleHeader.Render("Context"))
@@ -963,6 +964,62 @@ func (m *Model) noteContextFill(tokens, budget int) {
 	m.appendLine(styleWarn.Render(fmt.Sprintf(
 		"⚠ context %d%% full (%s of %s tokens) — /compact to keep the earlier conversation as a summary before it is dropped",
 		percent, humanTokens(tokens), humanTokens(budget))))
+}
+
+// spendWarnFraction is how close to a spending limit a session gets before the
+// operator is told, early enough to decide whether the task is worth the rest.
+const spendWarnFraction = 0.8
+
+// renderSessionSpend is the sidebar's session total and cost, each shown
+// against its limit when one is set, and highlighted once the session is close
+// to whichever limit it will reach first.
+func renderSessionSpend(stats governor.Stats) string {
+	tokens := fmt.Sprintf("tot: %d", stats.TotalTokens)
+	if stats.Limits.MaxTokens > 0 {
+		tokens += " / " + humanTokens(stats.Limits.MaxTokens)
+	}
+	cost := "$ N/A"
+	if stats.CostAvailable {
+		cost = fmt.Sprintf("$%.4f", stats.EstimatedCostUSD)
+	}
+	if stats.Limits.MaxCostUSD > 0 {
+		cost += fmt.Sprintf(" / $%.2f", stats.Limits.MaxCostUSD)
+	}
+
+	highlight := func(line string) string { return line }
+	if stats.LimitUsed() >= spendWarnFraction {
+		highlight = styleAccent
+	}
+	costLine := highlight(cost)
+	if !stats.CostAvailable {
+		costLine = styleMuted.Render(cost)
+	}
+	return highlight(tokens) + "\n" + costLine + "\n"
+}
+
+// noteSpend warns in the conversation when the session nears a spending limit,
+// once per approach: the sidebar figure is easy to miss on a long autonomous
+// run, and the limit otherwise arrives as a turn that stops without warning. It
+// also says, once, when a cost limit is set that the provider gives it nothing
+// to hold against.
+func (m *Model) noteSpend(stats governor.Stats) {
+	used := stats.LimitUsed()
+	switch {
+	case used < spendWarnFraction:
+		m.spendWarned = false
+	case !m.spendWarned:
+		m.spendWarned = true
+		m.appendLine(styleWarn.Render(fmt.Sprintf(
+			"⚠ this session has used %d%% of its spending limit — at 100%% the agent stops sending requests; /new starts a fresh session",
+			int(used*100))))
+	}
+
+	if stats.CostLimitUnenforced() && !m.costLimitWarned {
+		m.costLimitWarned = true
+		m.appendLine(styleWarn.Render(fmt.Sprintf(
+			"⚠ provider.max_session_cost_usd is $%.2f, but this provider reports no cost, so it cannot be enforced — set provider.max_session_tokens to cap the session",
+			stats.Limits.MaxCostUSD)))
+	}
 }
 
 // renderHistoryTrimmed describes what left the conversation, in the terms that

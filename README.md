@@ -200,6 +200,8 @@ runtime:
 
 ### Optional fields
 
+- `provider.max_session_cost_usd`: spending limit for one session, in USD (default 0, no limit)
+- `provider.max_session_tokens`: token limit for one session, input and output together (default 0, no limit)
 - `capabilities`: list of enabled capabilities like `shell`, `browser`, `filesystem`
 - `safety.approval_required`: `true` or `false`
 - `options.supports_vision`: `true` or `false`
@@ -220,6 +222,8 @@ model: "deepseek-chat"
 provider:
   base_url: "https://api.deepseek.com/v1"
   api_key_env: "DEEPSEEK_API_KEY"
+  max_session_cost_usd: 2.00
+  max_session_tokens: 2000000
 runtime:
   image: "aibitat-harness-runtime:latest"
   workspace: "./workspace"
@@ -254,6 +258,8 @@ From `internal/config/config.go`:
 - `model` (string)
 - `provider.base_url` (string)
 - `provider.api_key_env` (string)
+- `provider.max_session_cost_usd` (float)
+- `provider.max_session_tokens` (int)
 - `runtime.image` (string)
 - `runtime.workspace` (string)
 - `capabilities` (array of strings)
@@ -266,6 +272,30 @@ From `internal/config/config.go`:
 - `options.max_context_tokens` (int)
 - `options.browser_timeout` (int)
 - `options.browser_user_agent` (string)
+
+### Spending limits
+
+An agent left to run on its own against a paid API has nothing else to stop it
+spending: a loop between two tools goes on until the iteration cap, turn after
+turn. `provider.max_session_cost_usd` and `provider.max_session_tokens` cap one
+session. Tokens count input and output together — the conversation is re-sent on
+every request, so input is most of the bill. Zero, or leaving a field out, means
+no limit.
+
+The limits are checked before every model request, `/compact` included. Once one
+is reached, the turn ends with an error naming it and nothing more is sent in
+that session; tool calls the model had already asked for still run and are
+answered, so the history stays sendable. A session's spend is restored when it
+is resumed, so resuming does not reset the count, while `/new` starts a session
+at zero under the same limits. To carry on with a session that hit its limit,
+raise the limit in `agent.md` and relaunch with `--resume`.
+
+The sidebar shows the session's total and cost against the limits. At 80% of
+either, the figures are highlighted and the conversation gets a one-off warning.
+
+The cost limit relies on the provider reporting cost (OpenRouter does). Against
+one that does not, the cost stays `N/A` and the limit cannot be enforced — the
+conversation says so after the first request. Use `max_session_tokens` there.
 
 ### Tool output size
 
