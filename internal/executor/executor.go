@@ -26,6 +26,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -102,6 +103,35 @@ func bashInitScript() string {
 func writePromptSentinel(w io.Writer) error {
 	_, err := fmt.Fprintf(w, "printf '\\n%s:%%s\\n' \"$PWD\"\n", promptMark)
 	return err
+}
+
+// commandFileVar names the session variable that holds the command file's path
+// for the duration of one command.
+const commandFileVar = "__harness_command_file"
+
+// syntaxRejectedNote follows bash's own parse error when a command is refused,
+// so the model does not read the error as coming from a command that ran. It is
+// echoed inside single quotes, so it cannot contain one.
+const syntaxRejectedNote = "[not executed: bash rejected the syntax of this command, so none of it ran]"
+
+// wrapCommand turns cmd into a single line that bash is guaranteed to parse.
+// Written verbatim, an unbalanced quote or an open ( would leave bash waiting
+// for more input and swallow the sentinel after it; as base64 the command
+// cannot interfere with the line it travels on. The decoded file is checked
+// with `bash -n` before anything runs, because sourcing stops at a syntax error
+// only after executing every line in front of it. It is sourced rather than
+// run as a child so cd and export persist in the session, and it reads
+// /dev/null so a command waiting on stdin gets EOF instead of the sentinel.
+//
+// extglob is enabled for the check because the session may have turned it on,
+// and a pattern like !(x) is a syntax error to a bash without it.
+func wrapCommand(cmd string) string {
+	encoded := base64.StdEncoding.EncodeToString([]byte(cmd))
+	return fmt.Sprintf(
+		`%[1]s=$(mktemp "${TMPDIR:-/tmp}/command.XXXXXX") && printf '%%s' '%[2]s' | base64 -d > "$%[1]s" && `+
+			`if bash -O extglob -n "$%[1]s"; then . "$%[1]s" </dev/null; else echo '%[3]s'; fi; `+
+			`rm -f "$%[1]s"; unset %[1]s`+"\n",
+		commandFileVar, encoded, syntaxRejectedNote)
 }
 
 // readResult is one item produced by the reader goroutine.
@@ -306,7 +336,9 @@ func readUntilPromptFrom(ctx context.Context, ch <-chan readResult, maxBytes int
 	}
 }
 
-// Execute writes cmd to bash and reads everything up to the next prompt. On
+// Execute runs cmd in the bash session and reads everything up to the next
+// prompt. cmd may span several lines; one with a syntax error is refused
+// without running any of it, and bash's error comes back as the output. On
 // timeout the current bash session is abandoned and a fresh one is started;
 // the caller receives a *TimeoutError.
 func (e *DockerExecutor) Execute(ctx context.Context, cmd string) (string, error) {
@@ -323,7 +355,7 @@ func (e *DockerExecutor) Execute(ctx context.Context, cmd string) (string, error
 
 	log.Debug("send", "cmd", truncate(cmd, 200), "cwd", e.cwd)
 	start := time.Now()
-	if _, err := io.WriteString(e.sess.stdinW, cmd+"\n"); err != nil {
+	if _, err := io.WriteString(e.sess.stdinW, wrapCommand(cmd)); err != nil {
 		log.Error("write cmd failed", "err", err)
 		return "", fmt.Errorf("executor: write cmd: %w", err)
 	}

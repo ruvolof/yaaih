@@ -3,6 +3,7 @@ package executor
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"io"
 	"strings"
 	"sync"
@@ -70,6 +71,26 @@ func (f *fakeBash) openBash(ctx context.Context) (*bashProcess, error) {
 // sentinelRequest is the line writePromptSentinel emits, as bash receives it.
 var sentinelRequest = `printf '\n` + promptMark
 
+// unwrapCommand recovers the command wrapCommand encoded into line, and reports
+// false for any line that is not one.
+func unwrapCommand(line string) (string, bool) {
+	const encodedStart = `printf '%s' '`
+	start := strings.Index(line, encodedStart)
+	if start < 0 {
+		return "", false
+	}
+	encoded := line[start+len(encodedStart):]
+	end := strings.IndexByte(encoded, '\'')
+	if end < 0 {
+		return "", false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded[:end])
+	if err != nil {
+		return "", false
+	}
+	return string(decoded), true
+}
+
 func (f *fakeBash) run(stdin io.ReadCloser, stdout io.WriteCloser) {
 	reader := bufio.NewReader(stdin)
 	busy := false
@@ -91,6 +112,10 @@ func (f *fakeBash) run(stdin io.ReadCloser, stdout io.WriteCloser) {
 				return
 			}
 			continue
+		}
+
+		if command, wrapped := unwrapCommand(line); wrapped {
+			line = command
 		}
 
 		f.mu.Lock()

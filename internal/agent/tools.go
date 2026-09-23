@@ -165,7 +165,7 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 				"properties": map[string]any{
 					"command": map[string]any{
 						"type":        "string",
-						"description": "The command to execute (single line).",
+						"description": "The command to execute. May span several lines, including heredocs; stdin is empty, so nothing can prompt for input.",
 					},
 				},
 				"required": []string{"command"},
