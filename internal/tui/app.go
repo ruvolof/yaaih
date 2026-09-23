@@ -313,6 +313,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "y", "Y":
 				m.pendingApproval.Approve()
 				m.pendingApproval = nil
+			case "a":
+				m.pendingApproval.ApproveTool()
+				m.pendingApproval = nil
+			case "A":
+				m.pendingApproval.ApproveAll()
+				m.pendingApproval = nil
 			case "n", "N":
 				// Deny this call but let the agent keep iterating — the
 				// model may try a different tool / approach.
@@ -876,6 +882,10 @@ func (m *Model) renderSidebar() string {
 		fmt.Fprintln(&b, styleMuted.Render("—"))
 	}
 	fmt.Fprintln(&b)
+	if m.ag != nil {
+		fmt.Fprint(&b, renderApprovalStanding(m.ag.ApprovalStanding()))
+		fmt.Fprintln(&b)
+	}
 	fmt.Fprintln(&b, styleHeader.Render("Session"))
 	fmt.Fprintf(&b, "in:  %d\n", m.sessionStats.TotalInputTokens)
 	fmt.Fprintf(&b, "out: %d\n", m.sessionStats.TotalOutputTokens)
@@ -923,14 +933,38 @@ func (m *Model) renderSidebar() string {
 	return b.String()
 }
 
+// renderApprovalStanding is the sidebar's account of what runs without asking.
+// Anything the operator has waved through is highlighted: it stays on for the
+// rest of the session, long after the keypress that turned it on has scrolled
+// out of mind.
+func renderApprovalStanding(standing agent.ApprovalStanding) string {
+	var b strings.Builder
+	fmt.Fprintln(&b, styleHeader.Render("Approval"))
+	switch {
+	case !standing.Required:
+		fmt.Fprintln(&b, styleMuted.Render("not required"))
+	case standing.All:
+		fmt.Fprintln(&b, styleAccent("auto: all tools"))
+	case len(standing.Tools) > 0:
+		fmt.Fprintln(&b, styleAccent("auto:"))
+		for _, toolName := range standing.Tools {
+			fmt.Fprintln(&b, styleAccent(truncate("  "+toolName, 26)))
+		}
+	default:
+		fmt.Fprintln(&b, "asks every call")
+	}
+	return b.String()
+}
+
 func (m *Model) renderApproval() string {
-	r := m.pendingApproval
+	request := m.pendingApproval
 	return fmt.Sprintf(
-		"%s\n\nTool: %s\n\nArgs:\n%s\n\n%s",
+		"%s\n\nTool: %s\n\nArgs:\n%s\n\n%s\n%s",
 		styleHeader.Render("Approval required"),
-		styleAccent(r.ToolName),
-		r.Args,
+		styleAccent(request.ToolName),
+		request.Args,
 		styleMuted.Render("[y] approve   [n] deny   [q/esc] cancel turn"),
+		styleMuted.Render(fmt.Sprintf("[a] always allow %s   [A] allow all tools   (this session)", request.ToolName)),
 	)
 }
 

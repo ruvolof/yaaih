@@ -6,6 +6,7 @@ package agent
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -37,6 +38,7 @@ type ApprovalRequest struct {
 	ToolName string
 	Args     string // pretty-printed JSON
 	respond  chan ApprovalDecision
+	gate     *Gatekeeper
 }
 
 // Approve marks the request as approved (tool runs).
@@ -44,6 +46,21 @@ func (r *ApprovalRequest) Approve() {
 	gateLog.Info("approved", "id", r.ID, "tool", r.ToolName)
 	r.respond <- ApprovalApprove
 	close(r.respond)
+}
+
+// ApproveTool approves this call and stops asking about the same tool for the
+// rest of the session. The allowance is in place before the call is released,
+// so the next call to the tool in the same batch already runs unprompted.
+func (r *ApprovalRequest) ApproveTool() {
+	r.gate.AllowTool(r.ToolName)
+	r.Approve()
+}
+
+// ApproveAll approves this call and stops asking about any tool for the rest
+// of the session.
+func (r *ApprovalRequest) ApproveAll() {
+	r.gate.SetAutoApprove(true)
+	r.Approve()
 }
 
 // Deny refuses this single tool call; the agent's loop will continue and
@@ -69,16 +86,26 @@ type Gatekeeper struct {
 
 	nextID uint64
 
-	mu        sync.Mutex
-	autoYes   bool // session-wide override (e.g. operator pressed "a" for all)
-	closeOnce sync.Once
+	mu           sync.Mutex
+	autoYes      bool
+	allowedTools map[string]bool
+	closeOnce    sync.Once
+}
+
+// ApprovalStanding is what the operator has already said yes to for the rest of
+// the session, so the UI can show it rather than let it be silently on.
+type ApprovalStanding struct {
+	Required bool     // the agent's safety policy asks before restricted tools run
+	All      bool     // every restricted tool runs unprompted
+	Tools    []string // restricted tools that run unprompted, sorted
 }
 
 // NewGatekeeper returns a Gatekeeper configured by the agent's safety policy.
 func NewGatekeeper(approvalRequired bool) *Gatekeeper {
 	return &Gatekeeper{
-		required: approvalRequired,
-		requests: make(chan *ApprovalRequest, 4),
+		required:     approvalRequired,
+		requests:     make(chan *ApprovalRequest, 4),
+		allowedTools: map[string]bool{},
 	}
 }
 
@@ -100,16 +127,52 @@ func (g *Gatekeeper) SetAutoApprove(v bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.autoYes = v
+	gateLog.Info("auto-approve set", "enabled", v)
 }
 
-// Request blocks until the operator decides. When approval is not required
-// (or auto-approve is on), returns ApprovalApprove immediately without
-// emitting a request.
+// AllowTool stops prompting for calls to toolName for the remainder of the
+// session.
+func (g *Gatekeeper) AllowTool(toolName string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.allowedTools[toolName] = true
+	gateLog.Info("tool allowed for the session", "tool", toolName)
+}
+
+// RevokeAllowances goes back to prompting for every restricted call. What the
+// operator approved was judged against one conversation, so a new or resumed
+// session starts without it.
+func (g *Gatekeeper) RevokeAllowances() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.autoYes && len(g.allowedTools) == 0 {
+		return
+	}
+	g.autoYes = false
+	clear(g.allowedTools)
+	gateLog.Info("allowances revoked")
+}
+
+// Standing reports what currently runs without a prompt.
+func (g *Gatekeeper) Standing() ApprovalStanding {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	standing := ApprovalStanding{Required: g.required, All: g.autoYes}
+	for toolName := range g.allowedTools {
+		standing.Tools = append(standing.Tools, toolName)
+	}
+	slices.Sort(standing.Tools)
+	return standing
+}
+
+// Request blocks until the operator decides. When approval is not required,
+// or the operator has already allowed the tool (or every tool) for the
+// session, returns ApprovalApprove immediately without emitting a request.
 func (g *Gatekeeper) Request(ctx context.Context, toolName, args string) (ApprovalDecision, error) {
 	g.mu.Lock()
-	auto := g.autoYes
+	allowed := g.autoYes || g.allowedTools[toolName]
 	g.mu.Unlock()
-	if !g.required || auto {
+	if !g.required || allowed {
 		return ApprovalApprove, nil
 	}
 
@@ -119,6 +182,7 @@ func (g *Gatekeeper) Request(ctx context.Context, toolName, args string) (Approv
 		ToolName: toolName,
 		Args:     args,
 		respond:  make(chan ApprovalDecision, 1),
+		gate:     g,
 	}
 	gateLog.Info("approval requested", "id", id, "tool", toolName, "args_len", len(args))
 	select {

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ruvolof/aibitat-harness-go/internal/agent"
+	"github.com/ruvolof/aibitat-harness-go/internal/scripttools"
 )
 
 func TestLookupCommand(t *testing.T) {
@@ -99,5 +100,24 @@ func TestCompactRefusesWithoutAnAgent(t *testing.T) {
 	}
 	if !strings.Contains(stripANSI(model.chatBuf.String()), "no agent selected") {
 		t.Errorf("notice = %q, want it to point at the agent picker", stripANSI(model.chatBuf.String()))
+	}
+}
+
+// /reload is where the operator sees what they just armed: which tools the
+// agent wrote itself, and which will run without asking on an agent that asks.
+func TestReloadNamesDraftsAndToolsThatSkipApproval(t *testing.T) {
+	registered := []scripttools.Registered{
+		{Name: "check_url", Restricted: true},
+		{Name: "fetch", Restricted: false},
+		{Name: "ping", Draft: true, Restricted: true},
+	}
+
+	if got, want := describeScriptTools(registered, true),
+		"check_url, fetch (no approval), ping (workspace draft)"; got != want {
+		t.Errorf("with approval required: %q, want %q", got, want)
+	}
+	if got, want := describeScriptTools(registered, false),
+		"check_url, fetch, ping (workspace draft)"; got != want {
+		t.Errorf("without approval required: %q, want %q", got, want)
 	}
 }

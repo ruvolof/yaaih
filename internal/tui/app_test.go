@@ -1,9 +1,14 @@
 package tui
 
 import (
+	"context"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/ruvolof/aibitat-harness-go/internal/agent"
 	"github.com/ruvolof/aibitat-harness-go/internal/config"
@@ -180,13 +185,18 @@ func TestCommittingAnEmptyReplyChangesNothing(t *testing.T) {
 // handlers to run: they re-subscribe to the event stream after every message.
 func newTestModel(t *testing.T) *Model {
 	t.Helper()
+	return newGatedTestModel(t, agent.NewGatekeeper(false))
+}
+
+func newGatedTestModel(t *testing.T, gate *agent.Gatekeeper) *Model {
+	t.Helper()
 	cfg := &config.Config{
 		Model:        "stub-model",
 		SystemPrompt: "you are a test agent",
 		Runtime:      config.RuntimeCfg{Workspace: t.TempDir()},
 	}
 	ag := agent.New(cfg, nil, governor.New(cfg.Model), governor.New(cfg.Model),
-		nil, nil, agent.NewGatekeeper(false), nil, nil, t.TempDir())
+		nil, nil, gate, nil, nil, t.TempDir())
 	t.Cleanup(ag.Close)
 	return &Model{ag: ag}
 }
@@ -243,5 +253,80 @@ func TestQuittingStopsTheTurnItLeavesBehind(t *testing.T) {
 	idle := newTestModel(t)
 	if cmd := idle.quit(); cmd == nil {
 		t.Error("quitting with no turn in flight returned no command")
+	}
+}
+
+// nextApprovalPrompt waits for the agent to forward a prompt for the modal.
+func nextApprovalPrompt(t *testing.T, m *Model) agent.ApprovalRequestMsg {
+	t.Helper()
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case event := <-m.ag.Events():
+			if prompt, ok := event.(agent.ApprovalRequestMsg); ok {
+				return prompt
+			}
+		case <-timeout:
+			t.Fatal("no approval prompt reached the event stream")
+		}
+	}
+}
+
+func TestAlwaysAllowKeysAnswerTheModal(t *testing.T) {
+	cases := []struct {
+		key  string
+		want agent.ApprovalStanding
+	}{
+		{"y", agent.ApprovalStanding{Required: true}},
+		{"a", agent.ApprovalStanding{Required: true, Tools: []string{"shell_exec"}}},
+		{"A", agent.ApprovalStanding{Required: true, All: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			gate := agent.NewGatekeeper(true)
+			m := newGatedTestModel(t, gate)
+			decided := make(chan agent.ApprovalDecision, 1)
+			go func() {
+				decision, _ := gate.Request(context.Background(), "shell_exec", "{}")
+				decided <- decision
+			}()
+
+			m.Update(nextApprovalPrompt(t, m))
+			m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.key)})
+
+			if m.pendingApproval != nil {
+				t.Error("the modal is still open after it was answered")
+			}
+			select {
+			case decision := <-decided:
+				if decision != agent.ApprovalApprove {
+					t.Errorf("decision = %v, want the call approved", decision)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the tool call is still waiting on the modal")
+			}
+			if standing := m.ag.ApprovalStanding(); !reflect.DeepEqual(standing, tc.want) {
+				t.Errorf("standing = %+v, want %+v", standing, tc.want)
+			}
+		})
+	}
+}
+
+func TestSidebarShowsWhatRunsWithoutAsking(t *testing.T) {
+	cases := []struct {
+		standing agent.ApprovalStanding
+		want     []string
+	}{
+		{agent.ApprovalStanding{}, []string{"not required"}},
+		{agent.ApprovalStanding{Required: true}, []string{"asks every call"}},
+		{agent.ApprovalStanding{Required: true, Tools: []string{"file_write", "shell_exec"}},
+			[]string{"auto:", "  file_write", "  shell_exec"}},
+		{agent.ApprovalStanding{Required: true, All: true}, []string{"auto: all tools"}},
+	}
+	for _, tc := range cases {
+		lines := strings.Split(strings.TrimRight(stripANSI(renderApprovalStanding(tc.standing)), "\n"), "\n")
+		if want := append([]string{"Approval"}, tc.want...); !slices.Equal(lines, want) {
+			t.Errorf("standing %+v renders %q, want %q", tc.standing, lines, want)
+		}
 	}
 }

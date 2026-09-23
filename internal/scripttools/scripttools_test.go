@@ -197,12 +197,12 @@ func TestApplyReplacesScriptToolsOnly(t *testing.T) {
 	// unconditionally; they must survive reloads.
 	reg := agent.NewRegistry(&config.Config{}, runner, nil)
 
-	n, err := Apply(dir, ws, false, runner, reg)
+	registered, err := Apply(dir, ws, false, runner, reg)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("registered %d, want 1", n)
+	if len(registered) != 1 {
+		t.Fatalf("registered %+v, want 1 tool", registered)
 	}
 	if _, ok := reg.Lookup("check_url"); !ok {
 		t.Fatal("check_url not registered after apply")
@@ -217,12 +217,12 @@ func TestApplyReplacesScriptToolsOnly(t *testing.T) {
 	writeFile(t, dir, "ping.sh", "#!/bin/sh\n")
 	writeFile(t, dir, "ping.json", `{"name":"ping","description":"d","executable":"ping.sh","parameters":{"type":"object"}}`)
 
-	n, err = Apply(dir, ws, false, runner, reg)
+	registered, err = Apply(dir, ws, false, runner, reg)
 	if err != nil {
 		t.Fatalf("Apply (2): %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("registered %d, want 1", n)
+	if len(registered) != 1 {
+		t.Fatalf("registered %+v, want 1 tool", registered)
 	}
 	if _, ok := reg.Lookup("check_url"); ok {
 		t.Error("check_url should be gone after its manifest was removed and reapplied")
@@ -251,24 +251,66 @@ func TestApplyFromWorkspace(t *testing.T) {
 	reg := agent.NewRegistry(&config.Config{}, runner, nil)
 
 	// With fromWorkspace=false the empty persistent folder yields nothing.
-	n, err := Apply(dir, ws, false, runner, reg)
+	registered, err := Apply(dir, ws, false, runner, reg)
 	if err != nil {
 		t.Fatalf("Apply(false): %v", err)
 	}
-	if n != 0 {
-		t.Fatalf("registered %d from empty tool folder, want 0", n)
+	if len(registered) != 0 {
+		t.Fatalf("registered %+v from empty tool folder, want none", registered)
 	}
 
 	// With fromWorkspace=true the workspace-authored tool is picked up.
-	n, err = Apply(dir, ws, true, runner, reg)
+	registered, err = Apply(dir, ws, true, runner, reg)
 	if err != nil {
 		t.Fatalf("Apply(true): %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("registered %d from workspace, want 1", n)
+	if len(registered) != 1 || !registered[0].Draft {
+		t.Fatalf("registered %+v from workspace, want 1 draft", registered)
 	}
 	if _, ok := reg.Lookup("ping"); !ok {
 		t.Error("workspace-authored tool 'ping' not registered with fromWorkspace=true")
+	}
+}
+
+const unrestrictedManifest = `{"name":"fetch","description":"d","executable":"fetch.sh","parameters":{"type":"object"},"restricted":false}`
+
+// A draft's manifest is written by the agent, so it cannot be the thing that
+// decides whether the operator is asked. Promoted, the same manifest has been
+// reviewed, and its opt-out stands.
+func TestOnlyAPromotedToolMaySkipApproval(t *testing.T) {
+	toolsDir := t.TempDir()
+	workspace := t.TempDir()
+	drafts := filepath.Join(workspace, "tools")
+	if err := os.MkdirAll(drafts, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{toolsDir, drafts} {
+		writeFile(t, dir, "fetch.sh", "#!/bin/sh\n")
+		writeFile(t, dir, "fetch.json", unrestrictedManifest)
+	}
+	runner := &stubRunner{}
+	registry := agent.NewRegistry(&config.Config{}, runner, nil)
+
+	registered, err := Apply(toolsDir, workspace, false, runner, registry)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if tool, _ := registry.Lookup("fetch"); tool == nil || tool.Restricted {
+		t.Errorf("promoted tool with \"restricted\": false registered as %+v, want unrestricted", tool)
+	}
+	if len(registered) != 1 || registered[0].Restricted || registered[0].Draft {
+		t.Errorf("registered = %+v, want one unrestricted promoted tool", registered)
+	}
+
+	registered, err = Apply(toolsDir, workspace, true, runner, registry)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if tool, _ := registry.Lookup("fetch"); tool == nil || !tool.Restricted {
+		t.Errorf("workspace draft with \"restricted\": false registered as %+v, want restricted", tool)
+	}
+	if len(registered) != 1 || !registered[0].Restricted || !registered[0].Draft {
+		t.Errorf("registered = %+v, want the draft alone, restricted, in place of the tool it shadows", registered)
 	}
 }
 

@@ -291,10 +291,10 @@ func buildAgentRuntime(ctx context.Context, agentDir, resumeID string, newSessio
 
 	// 5. Script tools — only when the runtime is up (they execute in the sandbox).
 	if runner != nil {
-		if n, lerr := scripttools.Apply(cfg.ToolsDir, cfg.Runtime.Workspace, cfg.EnableWorkspaceTools, runner, ag.Registry()); lerr != nil {
+		if registered, lerr := scripttools.Apply(cfg.ToolsDir, cfg.Runtime.Workspace, cfg.EnableWorkspaceTools, runner, ag.Registry()); lerr != nil {
 			log.Warn("script tools load failed", "err", lerr, "dir", cfg.ToolsDir)
-		} else if n > 0 {
-			log.Info("script tools loaded", "count", n, "workspace_tools", cfg.EnableWorkspaceTools)
+		} else if len(registered) > 0 {
+			log.Info("script tools loaded", "count", len(registered), "workspace_tools", cfg.EnableWorkspaceTools)
 		}
 	}
 

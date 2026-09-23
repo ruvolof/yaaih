@@ -151,6 +151,10 @@ func New(
 	return a
 }
 
+// ApprovalStanding reports which restricted tools currently run without asking
+// the operator.
+func (a *Agent) ApprovalStanding() ApprovalStanding { return a.gate.Standing() }
+
 // Events is the read end of the event channel. Closed when the agent stops.
 func (a *Agent) Events() <-chan Event { return a.events }
 
@@ -326,6 +330,7 @@ func (a *Agent) resetConversation(w *session.Writer, seed []llm.Message) {
 	// The session-scoped usage restarts from zero; ResumeSession reseeds it from
 	// the loaded transcript afterwards. The global (run) governor is untouched.
 	a.gov.Reset()
+	a.gate.RevokeAllowances()
 	if len(seed) == 0 {
 		a.persist(a.messages[0], nil) // seq -> 1
 	}

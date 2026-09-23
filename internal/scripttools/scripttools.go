@@ -19,6 +19,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -66,9 +67,29 @@ type Manifest struct {
 	TimeoutSeconds int                    `json:"timeout_seconds"`
 }
 
-// isRestricted reports the effective restricted flag (default true).
+// isRestricted reports the manifest's restricted flag (default true).
 func (m Manifest) isRestricted() bool {
 	return m.Restricted == nil || *m.Restricted
+}
+
+// restrictedFrom is the flag the tool is registered with when loaded from
+// containerDir. Only a promoted tool's manifest may waive approval: the
+// operator reviewed it before copying it into the tool folder. A draft in the
+// workspace was written by the agent, manifest included, so honouring its
+// "restricted": false would let the agent give itself an unapproved way to run
+// code.
+func (m Manifest) restrictedFrom(containerDir string) bool {
+	if containerDir != ContainerToolsMount {
+		return true
+	}
+	return m.isRestricted()
+}
+
+// Registered describes a script tool as it went into the registry.
+type Registered struct {
+	Name       string
+	Draft      bool // loaded from the workspace rather than the promoted tool folder
+	Restricted bool // effective flag: calls go through the gatekeeper
 }
 
 // timeout returns the effective per-invocation timeout.
@@ -148,8 +169,8 @@ func loadOne(dir, abs string) (Manifest, bool) {
 }
 
 // Apply clears the previously registered script tools and registers the
-// current set from the live tool locations. Returns the number of tools
-// registered. Built-in tools are left untouched. Both the initial startup load
+// current set from the live tool locations. Returns the tools now registered,
+// one per name. Built-in tools are left untouched. Both the initial startup load
 // and the operator's /reload use this, so new, changed, and removed tools are
 // reflected consistently — without copying anything.
 //
@@ -158,40 +179,53 @@ func loadOne(dir, abs string) (Manifest, bool) {
 // drafted into <workspace>/tools are also loaded; a workspace draft shadows a
 // promoted tool of the same name so the agent can iterate before the operator
 // promotes it.
-func Apply(toolsDir, workspaceDir string, enableWorkspaceTools bool, runner executor.Executor, registry *agent.Registry) (int, error) {
+func Apply(toolsDir, workspaceDir string, enableWorkspaceTools bool, runner executor.Executor, registry *agent.Registry) ([]Registered, error) {
 	registry.RemoveByCapability(Capability)
 
-	total, err := loadAndRegister(toolsDir, ContainerToolsMount, runner, registry)
+	registered, err := loadAndRegister(toolsDir, ContainerToolsMount, runner, registry)
 	if err != nil {
-		return total, err
+		return registered, err
 	}
 	if enableWorkspaceTools {
-		n, err := loadAndRegister(filepath.Join(workspaceDir, "tools"), ContainerWorkspaceTools, runner, registry)
+		drafts, err := loadAndRegister(filepath.Join(workspaceDir, "tools"), ContainerWorkspaceTools, runner, registry)
+		registered = shadowedBy(registered, drafts)
 		if err != nil {
-			return total, err
+			return registered, err
 		}
-		total += n
 	}
-	log.Info("script tools applied", "registered", total, "workspace_tools", enableWorkspaceTools)
-	return total, nil
+	log.Info("script tools applied", "registered", len(registered), "workspace_tools", enableWorkspaceTools)
+	return registered, nil
+}
+
+// shadowedBy returns promoted with each tool that drafts redefines replaced by
+// its draft, the way the registry itself resolves the name.
+func shadowedBy(promoted, drafts []Registered) []Registered {
+	merged := slices.DeleteFunc(slices.Clone(promoted), func(tool Registered) bool {
+		return slices.ContainsFunc(drafts, func(draft Registered) bool { return draft.Name == tool.Name })
+	})
+	return append(merged, drafts...)
 }
 
 // loadAndRegister loads the manifests in hostDir and registers them to run from
 // containerDir inside the sandbox. A missing hostDir contributes nothing.
-func loadAndRegister(hostDir, containerDir string, runner executor.Executor, registry *agent.Registry) (int, error) {
+func loadAndRegister(hostDir, containerDir string, runner executor.Executor, registry *agent.Registry) ([]Registered, error) {
 	manifests, err := Load(hostDir)
 	if err != nil {
-		return 0, fmt.Errorf("load manifests from %s: %w", hostDir, err)
+		return nil, fmt.Errorf("load manifests from %s: %w", hostDir, err)
 	}
-	Register(manifests, containerDir, runner, registry)
-	return len(manifests), nil
+	return Register(manifests, containerDir, runner, registry), nil
 }
 
 // Register builds a Tool for each manifest and adds it to the registry. The
 // Tool's Fn shells out to the script at containerDir/<executable> inside the
 // container via runner.
-func Register(manifests []Manifest, containerDir string, runner executor.Executor, registry *agent.Registry) {
+func Register(manifests []Manifest, containerDir string, runner executor.Executor, registry *agent.Registry) []Registered {
+	registered := make([]Registered, 0, len(manifests))
 	for _, m := range manifests {
+		restricted := m.restrictedFrom(containerDir)
+		if restricted != m.isRestricted() {
+			log.Warn("workspace tool asked to skip approval, keeping it restricted", "name", m.Name)
+		}
 		registry.Add(&agent.Tool{
 			Def: llm.ToolDefinition{
 				Name:        m.Name,
@@ -199,17 +233,23 @@ func Register(manifests []Manifest, containerDir string, runner executor.Executo
 				Parameters:  m.Parameters,
 			},
 			Fn:         buildScriptFn(m, containerDir, runner),
-			Restricted: m.isRestricted(),
+			Restricted: restricted,
 			Capability: Capability,
+		})
+		registered = append(registered, Registered{
+			Name:       m.Name,
+			Draft:      containerDir != ContainerToolsMount,
+			Restricted: restricted,
 		})
 		log.Info("script tool registered",
 			"name", m.Name,
 			"executable", m.Executable,
 			"container_dir", containerDir,
-			"restricted", m.isRestricted(),
+			"restricted", restricted,
 			"timeout_sec", int(m.timeout().Seconds()),
 		)
 	}
+	return registered
 }
 
 // buildScriptFn returns the ToolFunc that runs one script invocation.

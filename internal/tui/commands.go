@@ -268,13 +268,16 @@ func init() {
 				m.appendLine(styleErr.Render("reload: agent is busy — wait for the current turn to finish"))
 				return nil
 			}
-			n, err := scripttools.Apply(m.cfg.ToolsDir, m.cfg.Runtime.Workspace, m.cfg.EnableWorkspaceTools, m.runner, m.ag.Registry())
+			registered, err := scripttools.Apply(m.cfg.ToolsDir, m.cfg.Runtime.Workspace, m.cfg.EnableWorkspaceTools, m.runner, m.ag.Registry())
 			if err != nil {
 				m.appendLine(styleErr.Render("reload failed: " + err.Error()))
 				return nil
 			}
-			msg := fmt.Sprintf("reloaded %d script tool(s) from %s", n, m.cfg.ToolsDir)
-			if n > 0 && !m.cfg.HasCapability(scripttools.Capability) {
+			msg := fmt.Sprintf("reloaded %d script tool(s) from %s", len(registered), m.cfg.ToolsDir)
+			if len(registered) > 0 {
+				msg += ": " + describeScriptTools(registered, m.cfg.Safety.ApprovalRequired)
+			}
+			if len(registered) > 0 && !m.cfg.HasCapability(scripttools.Capability) {
 				msg += fmt.Sprintf(" — note: agent.md lacks the %q capability, so they are not exposed to the model", scripttools.Capability)
 			}
 			m.appendLine(styleMuted.Render(msg))
@@ -381,4 +384,26 @@ func (m *Model) renderAllSessions() string {
 	}
 	b.WriteString(styleMuted.Render("/resume <id> to resume any of these"))
 	return b.String()
+}
+
+// describeScriptTools lists what /reload just armed, marking the drafts the
+// agent wrote itself and, where the agent is meant to ask first, any tool that
+// will run without asking.
+func describeScriptTools(registered []scripttools.Registered, approvalRequired bool) string {
+	descriptions := make([]string, 0, len(registered))
+	for _, tool := range registered {
+		var notes []string
+		if tool.Draft {
+			notes = append(notes, "workspace draft")
+		}
+		if approvalRequired && !tool.Restricted {
+			notes = append(notes, "no approval")
+		}
+		description := tool.Name
+		if len(notes) > 0 {
+			description += " (" + strings.Join(notes, ", ") + ")"
+		}
+		descriptions = append(descriptions, description)
+	}
+	return strings.Join(descriptions, ", ")
 }

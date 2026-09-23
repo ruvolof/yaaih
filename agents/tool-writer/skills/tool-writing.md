@@ -46,7 +46,8 @@ Field rules:
 - `executable` — required; the script's filename, relative to the manifest.
 - `parameters` — required; a JSON Schema object describing the arguments.
 - `restricted` — optional, defaults to `true`. Leave it `true` so the operator
-  approves each call. Only an explicit `false` removes the prompt.
+  approves each call. A draft in the workspace is always restricted; an
+  explicit `false` only takes effect once the operator promotes the tool.
 - `timeout_seconds` — optional, defaults to `30`.
 
 ## Calling convention (important)

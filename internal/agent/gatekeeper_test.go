@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +131,105 @@ func TestAutoApproveStopsPrompting(t *testing.T) {
 	}()
 	if decision, _ := gate.Request(context.Background(), "shell_exec", "{}"); decision != ApprovalDeny {
 		t.Errorf("decision = %v, want the prompt back after auto-approve was turned off", decision)
+	}
+}
+
+// Always allowing one tool waves that tool through for the rest of the session
+// and nothing else: a shell the operator trusts says nothing about a browser.
+func TestApproveToolStopsPromptingForThatToolOnly(t *testing.T) {
+	gate := NewGatekeeper(true)
+	go func() { (<-gate.Requests()).ApproveTool() }()
+	if decision, _ := gate.Request(context.Background(), "shell_exec", "{}"); decision != ApprovalApprove {
+		t.Fatalf("decision = %v, want the call that was always-allowed approved", decision)
+	}
+
+	if decision, err := gate.Request(context.Background(), "shell_exec", "{}"); err != nil || decision != ApprovalApprove {
+		t.Fatalf("decision = %v, err = %v, want an immediate approval", decision, err)
+	}
+	select {
+	case req := <-gate.Requests():
+		t.Errorf("a prompt for %q was emitted after it was always-allowed", req.ToolName)
+	default:
+	}
+
+	go func() { (<-gate.Requests()).Deny() }()
+	if decision, _ := gate.Request(context.Background(), "browser_eval", "{}"); decision != ApprovalDeny {
+		t.Errorf("decision = %v, want another tool still put to the operator", decision)
+	}
+
+	standing := gate.Standing()
+	if standing.All || !slices.Equal(standing.Tools, []string{"shell_exec"}) {
+		t.Errorf("standing = %+v, want shell_exec alone allowed", standing)
+	}
+}
+
+func TestApproveAllStopsPromptingForEveryTool(t *testing.T) {
+	gate := NewGatekeeper(true)
+	go func() { (<-gate.Requests()).ApproveAll() }()
+	if decision, _ := gate.Request(context.Background(), "shell_exec", "{}"); decision != ApprovalApprove {
+		t.Fatalf("decision = %v, want the call approved", decision)
+	}
+
+	for _, toolName := range []string{"shell_exec", "file_write", "browser_eval"} {
+		if decision, _ := gate.Request(context.Background(), toolName, "{}"); decision != ApprovalApprove {
+			t.Errorf("%s: decision = %v, want an immediate approval", toolName, decision)
+		}
+	}
+	select {
+	case req := <-gate.Requests():
+		t.Errorf("a prompt for %q was emitted after everything was allowed", req.ToolName)
+	default:
+	}
+	if standing := gate.Standing(); !standing.All || !standing.Required {
+		t.Errorf("standing = %+v, want every tool shown as allowed", standing)
+	}
+}
+
+// The chain the operator is sitting through is the case this exists for: once a
+// tool is always-allowed, the rest of the batch runs without coming back.
+func TestAlwaysAllowCoversTheRestOfTheBatch(t *testing.T) {
+	runner := &stubRunner{}
+	provider := &stubProvider{responses: []*llm.ChatResponse{
+		{
+			ToolCalls: []llm.ToolCall{
+				{ID: "call-1", Name: "shell_exec", Arguments: `{"command":"one"}`},
+				{ID: "call-2", Name: "shell_exec", Arguments: `{"command":"two"}`},
+				{ID: "call-3", Name: "shell_exec", Arguments: `{"command":"three"}`},
+			},
+			Usage: llm.TokenUsage{InputTokens: 10, OutputTokens: 5},
+		},
+		textResponse("done"),
+	}}
+	agent := newGatedTestAgent(t, NewGatekeeper(true), provider, runner)
+
+	prompts := 0
+	runTurnWithOperator(t, agent, "run the batch", func(req *ApprovalRequest) {
+		prompts++
+		req.ApproveTool()
+	})
+
+	if prompts != 1 {
+		t.Errorf("operator was asked %d times, want once", prompts)
+	}
+	if commands := runner.executed(); !slices.Equal(commands, []string{"one", "two", "three"}) {
+		t.Errorf("executor ran %v, want the whole batch", commands)
+	}
+}
+
+// What the operator waved through was judged against one conversation.
+func TestANewSessionAsksAgain(t *testing.T) {
+	gate := NewGatekeeper(true)
+	agent := newGatedTestAgent(t, gate, &stubProvider{}, &stubRunner{})
+	t.Cleanup(agent.Close)
+	gate.AllowTool("shell_exec")
+	gate.SetAutoApprove(true)
+
+	if _, err := agent.NewSession(); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	if standing := agent.ApprovalStanding(); standing.All || len(standing.Tools) != 0 {
+		t.Errorf("standing = %+v after a new session, want nothing allowed", standing)
 	}
 }
 

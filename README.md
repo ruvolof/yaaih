@@ -285,6 +285,28 @@ From `internal/config/config.go`:
 - `options.browser_timeout` (int)
 - `options.browser_user_agent` (string)
 
+### Approvals
+
+With `safety.approval_required: true`, every restricted tool call (`shell_exec`,
+`file_write`, `browser_eval`, and script tools) waits in a modal for an answer:
+
+| Key | Effect |
+| --- | --- |
+| `y` | run this call |
+| `a` | run this call, and stop asking about this tool for the rest of the session |
+| `A` | run this call, and stop asking about any tool for the rest of the session |
+| `n` | refuse this call; the model is told and may try something else |
+| `q` / `esc` | refuse this call and end the turn |
+
+The sidebar's *Approval* section shows what currently runs without asking.
+Allowances last until the session ends: `/new` and `/resume` start asking again.
+
+A script tool's manifest can opt out of approval with `"restricted": false`, but
+only once it is in the agent's `tools/` folder. A draft the agent wrote into
+`<workspace>/tools` (with `enable_workspace_tools: true`) is always restricted,
+whatever its manifest says, since the agent wrote the manifest too. `/reload`
+lists the tools it loaded and marks the drafts and any that skip approval.
+
 ### Spending limits
 
 An agent left to run on its own against a paid API has nothing else to stop it
