@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/docker/go-units"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
@@ -88,8 +89,42 @@ type ProviderCfg struct {
 
 // RuntimeCfg describes the Docker sandbox in which shell/browser tools execute.
 type RuntimeCfg struct {
-	Image     string `yaml:"image"`
-	Workspace string `yaml:"workspace"`
+	Image     string        `yaml:"image"`
+	Workspace string        `yaml:"workspace"`
+	Limits    RuntimeLimits `yaml:"limits"`
+
+	// RunAsHostUser runs the sandbox as the invoking user's uid:gid instead of
+	// root, so files the agent writes into the workspace belong to the operator
+	// on the host. The agent loses root inside the container with it: no
+	// apt-get, nothing that needs raw sockets.
+	RunAsHostUser bool `yaml:"run_as_host_user"`
+}
+
+// RuntimeLimits caps what the sandbox container may take from the host. A zero
+// field takes its default; there is no way to lift a limit entirely, only to
+// raise it.
+type RuntimeLimits struct {
+	Memory ByteSize `yaml:"memory"`
+	CPUs   float64  `yaml:"cpus"`
+
+	// PIDs counts threads as well as processes. Chromium alone runs a few
+	// hundred, so the default leaves room for the browser and still stops a
+	// fork bomb.
+	PIDs int64 `yaml:"pids"`
+}
+
+// ByteSize is a size in bytes, written in agent.md the way `docker run
+// --memory` takes it: "2g", "512m", or a bare number of bytes.
+type ByteSize int64
+
+// UnmarshalText parses a human-readable size such as "2g" or "512MB".
+func (size *ByteSize) UnmarshalText(text []byte) error {
+	parsed, err := units.RAMInBytes(string(text))
+	if err != nil {
+		return fmt.Errorf("invalid size %q: %w", text, err)
+	}
+	*size = ByteSize(parsed)
+	return nil
 }
 
 // Safety controls human-in-the-loop gating.
@@ -140,6 +175,13 @@ const (
 	defaultSessionsDir   = "sessions"
 	defaultMaxIterations = 25
 	defaultCmdTimeoutSec = 120
+
+	// Enough for Chromium with a few tabs alongside a build or a test run; low
+	// enough that a runaway process is stopped by the sandbox rather than by
+	// the host's OOM killer, which picks its own victim.
+	defaultRuntimeMemory = ByteSize(2 << 30)
+	defaultRuntimeCPUs   = 2.0
+	defaultRuntimePIDs   = 1024
 
 	// Long enough for a slow page to reach DOMContentLoaded on a bad
 	// connection, short enough that a selector that will never match gives the
@@ -326,6 +368,15 @@ func applyDefaults(c *Config) {
 	if c.Runtime.Workspace == "" {
 		c.Runtime.Workspace = defaultWorkspace
 	}
+	if c.Runtime.Limits.Memory == 0 {
+		c.Runtime.Limits.Memory = defaultRuntimeMemory
+	}
+	if c.Runtime.Limits.CPUs == 0 {
+		c.Runtime.Limits.CPUs = defaultRuntimeCPUs
+	}
+	if c.Runtime.Limits.PIDs == 0 {
+		c.Runtime.Limits.PIDs = defaultRuntimePIDs
+	}
 	if c.SkillsDir == "" {
 		c.SkillsDir = defaultSkillsDir
 	}
@@ -403,6 +454,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Provider.MaxSessionTokens < 0 {
 		return errors.New("agent.md: `provider.max_session_tokens` cannot be negative (0 means no limit)")
+	}
+	if c.Runtime.Limits.CPUs < 0 {
+		return errors.New("agent.md: `runtime.limits.cpus` cannot be negative")
+	}
+	if c.Runtime.Limits.PIDs < 0 {
+		return errors.New("agent.md: `runtime.limits.pids` cannot be negative")
 	}
 	if c.Provider.APIKeyEnv != "" && os.Getenv(c.Provider.APIKeyEnv) == "" {
 		// Not fatal — local providers may legitimately omit auth — but warn.

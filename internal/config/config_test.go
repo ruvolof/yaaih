@@ -288,3 +288,59 @@ func TestNegativeSpendLimitsAreRejected(t *testing.T) {
 		}
 	}
 }
+
+// The sandbox is capped even when agent.md says nothing about it, and keeps the
+// image's own user unless asked otherwise.
+func TestRuntimeLimitsApplyByDefault(t *testing.T) {
+	cfg, err := Load(writeAgent(t, t.TempDir(), ""), Overrides{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := RuntimeLimits{Memory: 2 << 30, CPUs: 2, PIDs: 1024}
+	if cfg.Runtime.Limits != want {
+		t.Errorf("limits = %+v, want %+v", cfg.Runtime.Limits, want)
+	}
+	if cfg.Runtime.RunAsHostUser {
+		t.Error("RunAsHostUser = true, want it off unless asked for")
+	}
+}
+
+func TestRuntimeLimitsAreRead(t *testing.T) {
+	cfg, err := Load(writeAgent(t, t.TempDir(),
+		"runtime:\n  run_as_host_user: true\n  limits:\n    memory: 512m\n    cpus: 1.5\n    pids: 256"), Overrides{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := RuntimeLimits{Memory: 512 << 20, CPUs: 1.5, PIDs: 256}
+	if cfg.Runtime.Limits != want {
+		t.Errorf("limits = %+v, want %+v", cfg.Runtime.Limits, want)
+	}
+	if !cfg.Runtime.RunAsHostUser {
+		t.Error("RunAsHostUser = false, want true")
+	}
+}
+
+func TestMemoryLimitAcceptsDockerSizes(t *testing.T) {
+	for value, want := range map[string]ByteSize{
+		"2g":         2 << 30,
+		"768MB":      768 << 20,
+		"1073741824": 1 << 30,
+	} {
+		cfg, err := Load(writeAgent(t, t.TempDir(), "runtime:\n  limits:\n    memory: "+value), Overrides{})
+		if err != nil {
+			t.Errorf("memory %q: Load: %v", value, err)
+			continue
+		}
+		if cfg.Runtime.Limits.Memory != want {
+			t.Errorf("memory %q = %d bytes, want %d", value, cfg.Runtime.Limits.Memory, want)
+		}
+	}
+}
+
+func TestInvalidRuntimeLimitsAreRejected(t *testing.T) {
+	for _, limit := range []string{"memory: lots", "memory: -1g", "cpus: -1", "pids: -1"} {
+		if _, err := Load(writeAgent(t, t.TempDir(), "runtime:\n  limits:\n    "+limit), Overrides{}); err == nil {
+			t.Errorf("Load accepted %q, want an error", limit)
+		}
+	}
+}

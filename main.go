@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"sync"
 	"syscall"
 	"time"
 
@@ -310,6 +311,11 @@ func buildAgentRuntime(ctx context.Context, agentDir, resumeID string, newSessio
 	return &agentRuntime{cfg: cfg, ag: ag, runner: runner, teardown: teardown}, nil
 }
 
+// orphanSweep runs the orphan-container cleanup once per harness run. Each
+// agent switch removes its own container on teardown, and whatever a crashed
+// harness leaves behind in the meantime is caught by the next launch.
+var orphanSweep sync.Once
+
 // setupRuntime brings up the Docker sandbox: verifies the runtime image is
 // present, starts the session container, and wires the executor and browser
 // to it. Returns a cleanup func that stops and removes the container.
@@ -318,12 +324,18 @@ func buildAgentRuntime(ctx context.Context, agentDir, resumeID string, newSessio
 // `.\build.ps1 image`; setup fails if it isn't present locally.
 func setupRuntime(ctx context.Context, cfg *config.Config) (executor.Executor, *browser.Browser, func(), error) {
 	log := logging.For("main")
-	docker.CleanupOrphans(ctx, os.Stderr)
+	orphanSweep.Do(func() { docker.CleanupOrphans(ctx, os.Stderr) })
 
 	rt, err := docker.New(ctx, docker.Options{
-		Image:          cfg.Runtime.Image,
-		Workspace:      cfg.Runtime.Workspace,
-		ToolsDir:       cfg.ToolsDir,
+		Image:     cfg.Runtime.Image,
+		Workspace: cfg.Runtime.Workspace,
+		ToolsDir:  cfg.ToolsDir,
+		Limits: docker.Limits{
+			MemoryBytes: int64(cfg.Runtime.Limits.Memory),
+			CPUs:        cfg.Runtime.Limits.CPUs,
+			PIDs:        cfg.Runtime.Limits.PIDs,
+		},
+		RunAsHostUser:  cfg.Runtime.RunAsHostUser,
 		ProgressWriter: os.Stderr,
 	})
 	if err != nil {

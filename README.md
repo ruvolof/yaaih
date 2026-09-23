@@ -202,6 +202,10 @@ runtime:
 
 - `provider.max_session_cost_usd`: spending limit for one session, in USD (default 0, no limit)
 - `provider.max_session_tokens`: token limit for one session, input and output together (default 0, no limit)
+- `runtime.limits.memory`: memory the sandbox container may use, as `docker run --memory` takes it (default `2g`)
+- `runtime.limits.cpus`: CPUs the sandbox container may use (default 2)
+- `runtime.limits.pids`: processes and threads the sandbox container may run (default 1024)
+- `runtime.run_as_host_user`: run the sandbox as your own user instead of root (default `false`)
 - `capabilities`: list of enabled capabilities like `shell`, `browser`, `filesystem`
 - `safety.approval_required`: `true` or `false`
 - `options.supports_vision`: `true` or `false`
@@ -227,6 +231,10 @@ provider:
 runtime:
   image: "aibitat-harness-runtime:latest"
   workspace: "./workspace"
+  limits:
+    memory: "2g"
+    cpus: 2
+    pids: 1024
 capabilities:
   - shell
   - browser
@@ -262,6 +270,10 @@ From `internal/config/config.go`:
 - `provider.max_session_tokens` (int)
 - `runtime.image` (string)
 - `runtime.workspace` (string)
+- `runtime.limits.memory` (size string, e.g. `2g`, `512m`)
+- `runtime.limits.cpus` (float)
+- `runtime.limits.pids` (int)
+- `runtime.run_as_host_user` (bool)
 - `capabilities` (array of strings)
 - `safety.approval_required` (bool)
 - `options.supports_vision` (bool)
@@ -296,6 +308,54 @@ either, the figures are highlighted and the conversation gets a one-off warning.
 The cost limit relies on the provider reporting cost (OpenRouter does). Against
 one that does not, the cost stays `N/A` and the limit cannot be enforced — the
 conversation says so after the first request. Use `max_session_tokens` there.
+
+### Sandbox limits
+
+The sandbox container is capped so that a runaway command — a fork bomb, a
+memory leak, a busy loop in a tool the agent wrote — is stopped inside it rather
+than starving the host. The defaults are 2 GB of memory, 2 CPUs, and 1024
+processes; `runtime.limits.memory`, `runtime.limits.cpus`, and
+`runtime.limits.pids` raise or lower them per agent. A limit can be raised but
+not removed.
+
+- **Memory** is a hard ceiling with no swap on top. When it is reached, the
+  kernel kills the largest process in the container — normally the command at
+  fault, which the shell then reports as `Killed`, or Chromium if the browser is
+  the one using the most. A killed browser shows up as a lost connection on the
+  next browser tool call.
+- **CPUs** above what the Docker host has are lowered to what it has, with a
+  note at startup. Docker Desktop's VM often has fewer CPUs than the machine.
+- **PIDs** counts threads as well as processes. Chromium alone runs a few
+  hundred; lower the limit much below the default and the browser starts
+  failing to open pages. A fork bomb stops at the limit, but whatever it
+  started keeps the sandbox full until the container is replaced — by
+  relaunching or by switching agents; `/new` alone keeps the same container.
+  The host is unaffected.
+
+The container also runs with `no-new-privileges`: setuid binaries in the image
+cannot raise a process's privileges.
+
+#### Running as your own user
+
+By default the sandbox runs as root. With native Docker Engine on Linux that
+means files the agent creates in the workspace are owned by `root` on the host,
+and you need `sudo` to edit or delete them. `runtime.run_as_host_user: true`
+runs the container as your uid:gid instead, so they are yours.
+
+The cost is root inside the sandbox: the agent cannot `apt-get install`, and
+tools that need raw sockets (`nmap -sS`, `tcpdump`) do not work. `pip install
+--user` and `npm` with a local prefix still do. Unless your uid happens to exist
+in the image (1000 is the Playwright base's `pwuser`), it has no name there and
+`whoami` fails; `HOME` is set to `/tmp` so the browser and the
+usual dotfile-writing tools have somewhere to write. Files the agent created as
+root in an earlier session stay root-owned, and the agent can no longer change
+them — `sudo chown -R $(id -u):$(id -g)` the workspace once when switching.
+
+The setting is ignored, with a note at startup, where it is not needed: on a
+rootless Docker daemon container root already is you, and on Windows Docker
+Desktop already hands workspace files to your user. Docker Desktop on Linux and
+macOS does the same through its file sharing, but the setting still applies
+there, for the root it takes away.
 
 ### Tool output size
 
@@ -402,6 +462,11 @@ file, so a resumed session stays compacted.
 
 The runtime Docker image is defined in `Dockerfile` and is based on Playwright.
 It includes shell utilities, Chromium tooling, and mounts the agent workspace at `/workspace`.
+
+Networking is not restricted: the container has the same outbound access as the
+host, which the browser and package installs need. Treat what the agent can
+reach from the sandbox as what it can reach from your machine. See
+[Sandbox limits](#sandbox-limits) for what is capped.
 
 ## 6b) Logs and crash diagnostics
 

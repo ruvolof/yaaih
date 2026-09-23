@@ -10,6 +10,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.4.5
 	github.com/docker/docker v27.4.1+incompatible
 	github.com/docker/go-connections v0.5.0
+	github.com/docker/go-units v0.5.0
 	github.com/mxschmitt/playwright-go v0.6100.0
 	github.com/openai/openai-go v0.1.0-beta.10
 	github.com/yuin/goldmark v1.7.8
@@ -26,7 +27,6 @@ require (
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/deckarep/golang-set/v2 v2.8.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
-	github.com/docker/go-units v0.5.0 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-jose/go-jose/v3 v3.0.5 // indirect
