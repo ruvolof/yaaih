@@ -154,3 +154,23 @@ func TestSessionVariablesSurviveTheWrapper(t *testing.T) {
 		t.Errorf("output = %q, want the session's own variables intact", out)
 	}
 }
+
+// A command printing something shaped like the sentinel — grepping this
+// package's source, say — must get all of its output back and leave the
+// tracked CWD alone.
+func TestOutputShapedLikeASentinelDoesNotEndTheCommand(t *testing.T) {
+	exec := newLocalExecutor(t, 5*time.Second)
+	cwdBefore := exec.CWD()
+
+	out := execute(t, exec, "echo before\necho '__HARNESS_PROMPT__:/elsewhere'\necho after")
+
+	if want := "before\n__HARNESS_PROMPT__:/elsewhere\nafter"; strings.TrimSpace(out) != want {
+		t.Errorf("output = %q, want %q", out, want)
+	}
+	if exec.CWD() != cwdBefore {
+		t.Errorf("CWD = %q, want it kept at %q", exec.CWD(), cwdBefore)
+	}
+	if out := execute(t, exec, "echo next"); strings.TrimSpace(out) != "next" {
+		t.Errorf("next command's output = %q, want only its own", out)
+	}
+}

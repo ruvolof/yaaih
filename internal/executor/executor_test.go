@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+const testPromptMark = promptMarkPrefix + "0123456789abcdef0123456789abcdef__"
+
 // feed pushes lines onto a channel the way a session's reader goroutine does,
 // ending with a prompt sentinel carrying cwd.
 func feed(lines []string, cwd string) chan readResult {
@@ -14,7 +16,7 @@ func feed(lines []string, cwd string) chan readResult {
 	for _, line := range lines {
 		ch <- readResult{line: line}
 	}
-	ch <- readResult{line: promptMark + ":" + cwd + "\n"}
+	ch <- readResult{line: testPromptMark + ":" + cwd + "\n"}
 	return ch
 }
 
@@ -22,7 +24,7 @@ func readAll(t *testing.T, ch chan readResult, maxBytes int) (string, string, in
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, cwd, discarded, err := readUntilPromptFrom(ctx, ch, maxBytes)
+	out, cwd, discarded, err := readUntilPromptFrom(ctx, ch, testPromptMark, maxBytes)
 	if err != nil {
 		t.Fatalf("readUntilPromptFrom: %v", err)
 	}
@@ -104,7 +106,7 @@ func TestReadUntilPromptUncapped(t *testing.T) {
 
 func TestReadUntilPromptStopsAtSentinelMidLine(t *testing.T) {
 	ch := make(chan readResult, 2)
-	ch <- readResult{line: "trailing output" + promptMark + ":/workspace\n"}
+	ch <- readResult{line: "trailing output" + testPromptMark + ":/workspace\n"}
 	out, cwd, _ := readAll(t, ch, maxCapturedBytes)
 
 	if out != "trailing output" {
@@ -112,5 +114,47 @@ func TestReadUntilPromptStopsAtSentinelMidLine(t *testing.T) {
 	}
 	if cwd != "/workspace" {
 		t.Errorf("cwd = %q, want /workspace", cwd)
+	}
+}
+
+// Output is arbitrary text, so it can contain something shaped like a sentinel:
+// the marker this package once used as a constant, or another session's. Only
+// this session's marker may end the read.
+func TestReadUntilPromptIgnoresOtherMarkers(t *testing.T) {
+	lines := []string{
+		"before\n",
+		"__HARNESS_PROMPT__:/elsewhere\n",
+		promptMarkPrefix + "ffffffffffffffffffffffffffffffff__:/elsewhere\n",
+		"after\n",
+	}
+	out, cwd, _ := readAll(t, feed(lines, "/workspace"), maxCapturedBytes)
+
+	if want := strings.Join(lines, ""); out != want {
+		t.Errorf("output = %q, want every line up to this session's sentinel: %q", out, want)
+	}
+	if cwd != "/workspace" {
+		t.Errorf("cwd = %q, want /workspace from this session's sentinel", cwd)
+	}
+}
+
+func TestPromptMarksAreUniqueAndGreppable(t *testing.T) {
+	first, err := newPromptMark()
+	if err != nil {
+		t.Fatalf("newPromptMark: %v", err)
+	}
+	second, err := newPromptMark()
+	if err != nil {
+		t.Fatalf("newPromptMark: %v", err)
+	}
+	if first == second {
+		t.Errorf("two marks are both %q, want each session to draw its own", first)
+	}
+	for _, promptMark := range []string{first, second} {
+		if !strings.HasPrefix(promptMark, promptMarkPrefix) || !strings.HasSuffix(promptMark, "__") {
+			t.Errorf("mark %q, want it shaped %s<nonce>__", promptMark, promptMarkPrefix)
+		}
+		if strings.ContainsAny(promptMark, `'"\%:`) {
+			t.Errorf("mark %q holds a character that would break the sentinel printf or its parsing", promptMark)
+		}
 	}
 }

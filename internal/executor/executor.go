@@ -26,7 +26,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -42,10 +44,21 @@ import (
 
 var log = logging.For("executor")
 
-// promptMark is a unique sentinel written by bash after every command so the
-// reader knows where one command's output ends. The CWD is included in the
-// sentinel so the executor can track it without an extra round-trip.
-const promptMark = "__HARNESS_PROMPT__"
+// promptMarkPrefix starts every prompt sentinel, so a sentinel is recognisable
+// when grepping logs or captured output.
+const promptMarkPrefix = "__HARNESS_"
+
+// newPromptMark returns the sentinel bash writes after every command so the
+// reader knows where one command's output ends. It is random per session:
+// command output is arbitrary text, and a fixed marker would end the read early
+// for any command that happened to print it, such as grepping this source.
+func newPromptMark() (string, error) {
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	return promptMarkPrefix + hex.EncodeToString(nonce) + "__", nil
+}
 
 // readerChanBuf is the buffer size of the per-session line channel. Large
 // enough that ordinary command output (a few hundred lines) never backpressures
@@ -96,11 +109,11 @@ func bashInitScript() string {
 		"stty -echo 2>/dev/null || true\n"
 }
 
-// writePromptSentinel writes a single bash command that prints the prompt
-// sentinel and the current working directory. Called after the init script
-// and after every user command so readUntilPrompt always has a deterministic
-// boundary to lock onto.
-func writePromptSentinel(w io.Writer) error {
+// writePromptSentinel writes a single bash command that prints promptMark and
+// the current working directory. Called after the init script and after every
+// user command so readUntilPromptFrom always has a deterministic boundary to
+// lock onto.
+func writePromptSentinel(w io.Writer, promptMark string) error {
 	_, err := fmt.Fprintf(w, "printf '\\n%s:%%s\\n' \"$PWD\"\n", promptMark)
 	return err
 }
@@ -161,10 +174,11 @@ type bashOpener interface {
 // stale data, lingering reader goroutine, or half-killed child process can
 // leak into subsequent commands.
 type session struct {
-	proc    *bashProcess
-	stdinW  io.Writer
-	stdoutR *bufio.Reader
-	lineCh  chan readResult // owned end-to-end by this session
+	proc       *bashProcess
+	stdinW     io.Writer
+	stdoutR    *bufio.Reader
+	lineCh     chan readResult // owned end-to-end by this session
+	promptMark string
 }
 
 // DockerExecutor runs the persistent bash inside the session container via
@@ -224,16 +238,21 @@ func newExecutor(ctx context.Context, opener bashOpener, timeout time.Duration) 
 // bash so the first prompt sentinel arrives. Used both by the constructor and
 // by the timeout-recovery restart path.
 func (e *DockerExecutor) openSession(ctx context.Context) (*session, string, error) {
+	promptMark, err := newPromptMark()
+	if err != nil {
+		return nil, "", fmt.Errorf("executor: generate prompt marker: %w", err)
+	}
 	proc, err := e.opener.openBash(ctx)
 	if err != nil {
 		return nil, "", err
 	}
 
 	s := &session{
-		proc:    proc,
-		stdinW:  proc.stdin,
-		stdoutR: bufio.NewReader(proc.stdout),
-		lineCh:  make(chan readResult, readerChanBuf),
+		proc:       proc,
+		stdinW:     proc.stdin,
+		stdoutR:    bufio.NewReader(proc.stdout),
+		lineCh:     make(chan readResult, readerChanBuf),
+		promptMark: promptMark,
 	}
 	go s.readerLoop()
 
@@ -241,13 +260,13 @@ func (e *DockerExecutor) openSession(ctx context.Context) (*session, string, err
 		s.close()
 		return nil, "", fmt.Errorf("executor: prime bash: %w", err)
 	}
-	if err := writePromptSentinel(s.stdinW); err != nil {
+	if err := writePromptSentinel(s.stdinW, s.promptMark); err != nil {
 		s.close()
 		return nil, "", fmt.Errorf("executor: emit init prompt: %w", err)
 	}
 	initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	_, cwd, _, err := readUntilPromptFrom(initCtx, s.lineCh, maxCapturedBytes)
+	_, cwd, _, err := readUntilPromptFrom(initCtx, s.lineCh, s.promptMark, maxCapturedBytes)
 	if err != nil {
 		s.close()
 		return nil, "", fmt.Errorf("executor: read initial prompt: %w", err)
@@ -308,7 +327,7 @@ func (s *session) drainPending() {
 // sentinel either way, or the abandoned tail of this command's output would be
 // read as the next command's result. Whole lines are dropped rather than split,
 // so the retained text is never cut mid-rune. Zero means no cap.
-func readUntilPromptFrom(ctx context.Context, ch <-chan readResult, maxBytes int) (output, cwd string, discarded int, err error) {
+func readUntilPromptFrom(ctx context.Context, ch <-chan readResult, promptMark string, maxBytes int) (output, cwd string, discarded int, err error) {
 	var buf bytes.Buffer
 	keep := func(line string) {
 		if maxBytes > 0 && buf.Len()+len(line) > maxBytes {
@@ -359,7 +378,7 @@ func (e *DockerExecutor) Execute(ctx context.Context, cmd string) (string, error
 		log.Error("write cmd failed", "err", err)
 		return "", fmt.Errorf("executor: write cmd: %w", err)
 	}
-	if err := writePromptSentinel(e.sess.stdinW); err != nil {
+	if err := writePromptSentinel(e.sess.stdinW, e.sess.promptMark); err != nil {
 		log.Error("write prompt sentinel failed", "err", err)
 		return "", fmt.Errorf("executor: emit prompt: %w", err)
 	}
@@ -367,7 +386,7 @@ func (e *DockerExecutor) Execute(ctx context.Context, cmd string) (string, error
 	cmdCtx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
-	out, cwd, discarded, err := readUntilPromptFrom(cmdCtx, e.sess.lineCh, maxCapturedBytes)
+	out, cwd, discarded, err := readUntilPromptFrom(cmdCtx, e.sess.lineCh, e.sess.promptMark, maxCapturedBytes)
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		// Either way bash is still running the command and still owns stdin,
 		// so the session cannot be reused — the next command would sit unread

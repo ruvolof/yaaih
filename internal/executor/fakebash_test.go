@@ -68,8 +68,15 @@ func (f *fakeBash) openBash(ctx context.Context) (*bashProcess, error) {
 	}, nil
 }
 
-// sentinelRequest is the line writePromptSentinel emits, as bash receives it.
-var sentinelRequest = `printf '\n` + promptMark
+// sentinelRequest starts the line writePromptSentinel emits, as bash receives
+// it; the session's marker follows, up to the colon.
+const sentinelRequest = `printf '\n` + promptMarkPrefix
+
+// promptMarkOf recovers the marker a sentinel request asks bash to print.
+func promptMarkOf(line string) string {
+	promptMark, _, _ := strings.Cut(strings.TrimPrefix(line, `printf '\n`), ":")
+	return promptMark
+}
 
 // unwrapCommand recovers the command wrapCommand encoded into line, and reports
 // false for any line that is not one.
@@ -108,7 +115,7 @@ func (f *fakeBash) run(stdin io.ReadCloser, stdout io.WriteCloser) {
 			f.mu.Lock()
 			cwd := f.cwd
 			f.mu.Unlock()
-			if _, err := io.WriteString(stdout, "\n"+promptMark+":"+cwd+"\n"); err != nil {
+			if _, err := io.WriteString(stdout, "\n"+promptMarkOf(line)+":"+cwd+"\n"); err != nil {
 				return
 			}
 			continue
