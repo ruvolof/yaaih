@@ -100,29 +100,62 @@ func (m Manifest) timeout() time.Duration {
 	return time.Duration(m.TimeoutSeconds) * time.Second
 }
 
-// Load returns the validated manifests found under dir. A missing dir returns
-// (nil, nil). Per-file errors (bad JSON, failed validation, missing
-// executable) are logged and skipped so one bad tool doesn't sink the batch.
+// Load returns the validated manifests found under dir, walking subfolders so
+// tools can be organised into subdirectories (e.g. one per MITRE tactic). A
+// missing dir returns (nil, nil). Per-file errors (bad JSON, failed validation,
+// missing executable) are logged and skipped so one bad tool doesn't sink the
+// batch. Each manifest's executable is resolved relative to the manifest's own
+// directory and then rewritten relative to dir, so the container runs it at
+// <mount>/<subdir>/<executable>.
 func Load(dir string) ([]Manifest, error) {
-	entries, err := os.ReadDir(dir)
+	info, err := os.Stat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read tools dir %s: %w", dir, err)
 	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("read tools dir %s: not a directory", dir)
+	}
 
 	var out []Manifest
-	for _, e := range entries {
-		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".json") {
-			continue
+	walkErr := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			// One unreadable subtree shouldn't sink the batch: log and skip it.
+			log.Warn("tools walk error, skipping", "path", p, "err", err.Error())
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
-		abs := filepath.Join(dir, e.Name())
-		m, ok := loadOne(dir, abs)
+		if d.IsDir() || !strings.EqualFold(filepath.Ext(d.Name()), ".json") {
+			return nil
+		}
+		manifestDir := filepath.Dir(p)
+		m, ok := loadOne(manifestDir, p)
 		if !ok {
-			continue
+			return nil
 		}
+		// The executable was validated relative to the manifest's directory;
+		// rewrite it relative to the tools root so path.Join(mount, executable)
+		// resolves inside the sandbox, and reject anything that escapes root.
+		rel, relErr := filepath.Rel(dir, manifestDir)
+		if relErr != nil {
+			log.Warn("manifest rejected: cannot resolve path under tools dir", "path", p, "err", relErr.Error())
+			return nil
+		}
+		exec := filepath.Join(rel, m.Executable)
+		if exec == ".." || strings.HasPrefix(exec, ".."+string(filepath.Separator)) {
+			log.Warn("manifest rejected: executable escapes tools dir", "path", p, "executable", m.Executable)
+			return nil
+		}
+		m.Executable = filepath.ToSlash(exec)
 		out = append(out, m)
+		return nil
+	})
+	if walkErr != nil {
+		return out, fmt.Errorf("walk tools dir %s: %w", dir, walkErr)
 	}
 	return out, nil
 }

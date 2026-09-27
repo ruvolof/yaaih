@@ -67,6 +67,29 @@ func TestLoadValidManifest(t *testing.T) {
 	}
 }
 
+// A manifest in a subfolder is discovered, and its executable is rewritten
+// relative to the tools root so the sandbox runs it at <mount>/<subdir>/<exe>.
+func TestLoadNestedManifest(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "reconnaissance")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, sub, "check_url.sh", "#!/bin/sh\necho ok\n")
+	writeFile(t, sub, "check_url.json", validManifest)
+
+	ms, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(ms) != 1 {
+		t.Fatalf("got %d manifests, want 1", len(ms))
+	}
+	if ms[0].Executable != "reconnaissance/check_url.sh" {
+		t.Errorf("executable = %q, want reconnaissance/check_url.sh", ms[0].Executable)
+	}
+}
+
 func TestLoadMissingExecutableRejected(t *testing.T) {
 	dir := t.TempDir()
 	// Manifest references check_url.sh but we never create it.
