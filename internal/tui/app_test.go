@@ -13,6 +13,7 @@ import (
 	"github.com/ruvolof/aibitat-harness-go/internal/agent"
 	"github.com/ruvolof/aibitat-harness-go/internal/config"
 	"github.com/ruvolof/aibitat-harness-go/internal/governor"
+	"github.com/ruvolof/aibitat-harness-go/internal/session"
 )
 
 // The gauge is the operator's warning that a compaction is coming. A stats
@@ -196,7 +197,7 @@ func newGatedTestModel(t *testing.T, gate *agent.Gatekeeper) *Model {
 		Runtime:      config.RuntimeCfg{Workspace: t.TempDir()},
 	}
 	ag := agent.New(cfg, nil, governor.New(cfg.Model), governor.New(cfg.Model),
-		nil, nil, gate, nil, nil, t.TempDir())
+		nil, nil, gate, nil, session.Transcript{}, t.TempDir())
 	t.Cleanup(ag.Close)
 	return &Model{ag: ag}
 }

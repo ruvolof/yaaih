@@ -37,7 +37,7 @@ func newPersistedTestAgentWithRunner(t *testing.T, provider llm.Provider, runner
 		Options:      windowedOptions(64_000),
 	}
 	agent := New(cfg, provider, governor.New(cfg.Model), governor.New(cfg.Model),
-		runner, nil, NewGatekeeper(false), writer, nil, sessionsDir)
+		runner, nil, NewGatekeeper(false), writer, session.Transcript{}, sessionsDir)
 	return agent, sessionsDir, id
 }
 

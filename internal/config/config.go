@@ -53,8 +53,12 @@ type Config struct {
 	// the operator promotes them to the persistent tool folder. Default false.
 	EnableWorkspaceTools bool `yaml:"enable_workspace_tools"`
 
-	// SystemPrompt is the Markdown body following the frontmatter.
+	// SystemPrompt is the Markdown body following the frontmatter: the agent's
+	// own prompt, which the agent composes with Skills into the one it sends.
 	SystemPrompt string `yaml:"-"`
+
+	// Skills are the enabled skills found in SkillsDir, in filename order.
+	Skills []skills.Skill `yaml:"-"`
 
 	// SourcePath is the absolute path to the agent.md that produced this Config.
 	SourcePath string `yaml:"-"`
@@ -245,18 +249,18 @@ func Load(path string, ov Overrides) (*Config, error) {
 	applyDefaults(cfg)
 	resolveRelativePaths(cfg, filepath.Dir(abs))
 
-	// Load skills from the resolved skills directory and append them below the
-	// system prompt (after a blank line) so the agent author's voice comes
-	// first and skills read as addenda. Absence of the directory is not an
-	// error.
-	ss, err := skills.Load(cfg.SkillsDir)
+	// Absence of the skills directory is not an error.
+	cfg.Skills, err = skills.Load(cfg.SkillsDir)
 	if err != nil {
 		log.Warn("skills load partial failure", "err", err)
 	}
-	if block := skills.Format(ss); block != "" {
-		cfg.SystemPrompt = cfg.SystemPrompt + "\n\n" + block
+	onDemand := 0
+	for _, skill := range cfg.Skills {
+		if skill.OnDemand() {
+			onDemand++
+		}
 	}
-	log.Info("skills loaded", "count", len(ss), "dir", cfg.SkillsDir)
+	log.Info("skills loaded", "count", len(cfg.Skills), "on_demand", onDemand, "dir", cfg.SkillsDir)
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err

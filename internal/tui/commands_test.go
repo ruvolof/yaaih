@@ -5,7 +5,11 @@ import (
 	"testing"
 
 	"github.com/ruvolof/aibitat-harness-go/internal/agent"
+	"github.com/ruvolof/aibitat-harness-go/internal/config"
+	"github.com/ruvolof/aibitat-harness-go/internal/governor"
 	"github.com/ruvolof/aibitat-harness-go/internal/scripttools"
+	"github.com/ruvolof/aibitat-harness-go/internal/session"
+	"github.com/ruvolof/aibitat-harness-go/internal/skills"
 )
 
 func TestLookupCommand(t *testing.T) {
@@ -119,5 +123,66 @@ func TestReloadNamesDraftsAndToolsThatSkipApproval(t *testing.T) {
 	if got, want := describeScriptTools(registered, false),
 		"check_url, fetch, ping (workspace draft)"; got != want {
 		t.Errorf("without approval required: %q, want %q", got, want)
+	}
+}
+
+func newSkilledTestModel(t *testing.T) *Model {
+	t.Helper()
+	cfg := &config.Config{
+		Model:        "stub-model",
+		SystemPrompt: "you are a test agent",
+		Runtime:      config.RuntimeCfg{Workspace: t.TempDir()},
+		Skills: []skills.Skill{
+			{Name: "network", Description: "debugging network problems", Body: "NETWORK"},
+			{Name: "safety", Body: "SAFETY", Always: true},
+		},
+	}
+	ag := agent.New(cfg, nil, governor.New(cfg.Model), governor.New(cfg.Model),
+		nil, nil, agent.NewGatekeeper(false), nil, session.Transcript{}, t.TempDir())
+	t.Cleanup(ag.Close)
+	return &Model{ag: ag}
+}
+
+func runCommand(t *testing.T, model *Model, name, args string) string {
+	t.Helper()
+	command, ok := lookupCommand(name)
+	if !ok {
+		t.Fatalf("/%s is not registered", name)
+	}
+	model.chatBuf.Reset()
+	command.Handler(model, args)
+	return stripANSI(model.chatBuf.String())
+}
+
+func TestSkillCommandLoadsASkill(t *testing.T) {
+	model := newSkilledTestModel(t)
+
+	listed := runCommand(t, model, "skills", "")
+	for _, want := range []string{"network (available) — debugging network problems", "safety (always)"} {
+		if !strings.Contains(listed, want) {
+			t.Errorf("/skills = %q, want it to contain %q", listed, want)
+		}
+	}
+
+	if loaded := runCommand(t, model, "skill", "network"); !strings.Contains(loaded, `Loaded skill "network"`) {
+		t.Errorf("/skill network = %q, want it to confirm the load", loaded)
+	}
+	if listed := runCommand(t, model, "skills", ""); !strings.Contains(listed, "network (loaded)") {
+		t.Errorf("/skills after loading = %q, want network marked loaded", listed)
+	}
+}
+
+func TestSkillCommandReportsWhatItCannotDo(t *testing.T) {
+	model := newSkilledTestModel(t)
+
+	if got := runCommand(t, model, "skill", ""); !strings.Contains(got, "usage: /skill <name>") {
+		t.Errorf("/skill with no name = %q, want usage", got)
+	}
+	if got := runCommand(t, model, "skill", "nonexistent"); !strings.Contains(got, `no skill "nonexistent"`) {
+		t.Errorf("/skill nonexistent = %q, want it to name the missing skill", got)
+	}
+	model.busy = true
+	if got := runCommand(t, model, "skill", "network"); !strings.Contains(got, "busy") {
+		t.Errorf("/skill during a turn = %q, want it refused as busy", got)
 	}
 }

@@ -19,6 +19,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/ruvolof/aibitat-harness-go/internal/agent"
 	"github.com/ruvolof/aibitat-harness-go/internal/config"
 	"github.com/ruvolof/aibitat-harness-go/internal/scripttools"
 	"github.com/ruvolof/aibitat-harness-go/internal/session"
@@ -305,6 +306,41 @@ func init() {
 		},
 	})
 	registerCommand(&Command{
+		Name:        "skills",
+		Description: "List the agent's skills and which are loaded.",
+		Handler: func(m *Model, args string) tea.Cmd {
+			if !m.requireAgent("skills") {
+				return nil
+			}
+			m.appendLine(renderSkills(m.ag.SkillStates()))
+			return nil
+		},
+	})
+	registerCommand(&Command{
+		Name:        "skill",
+		Description: "Load an on-demand skill into the system prompt for the rest of the session.",
+		Handler: func(m *Model, args string) tea.Cmd {
+			if !m.requireAgent("skill") {
+				return nil
+			}
+			name := strings.TrimSpace(args)
+			if name == "" {
+				m.appendLine(styleErr.Render("usage: /skill <name> — see /skills"))
+				return nil
+			}
+			if m.refuseIfBusy("skill") {
+				return nil
+			}
+			result, err := m.ag.LoadSkill(name)
+			if err != nil {
+				m.appendLine(styleErr.Render("skill: " + err.Error()))
+				return nil
+			}
+			m.appendLine(styleMuted.Render("✦ " + result))
+			return nil
+		},
+	})
+	registerCommand(&Command{
 		Name:        "help",
 		Description: "List available commands.",
 		Handler: func(m *Model, args string) tea.Cmd {
@@ -406,4 +442,21 @@ func describeScriptTools(registered []scripttools.Registered, approvalRequired b
 		descriptions = append(descriptions, description)
 	}
 	return strings.Join(descriptions, ", ")
+}
+
+// renderSkills lists the agent's skills with where each stands in the session.
+func renderSkills(statuses []agent.SkillStatus) string {
+	if len(statuses) == 0 {
+		return styleMuted.Render("this agent has no skills")
+	}
+	var b strings.Builder
+	for _, status := range statuses {
+		fmt.Fprintf(&b, "%s (%s)", status.Name, status.State)
+		if status.Description != "" {
+			fmt.Fprintf(&b, " — %s", status.Description)
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("/skill <name> loads an available skill")
+	return styleMuted.Render(b.String())
 }

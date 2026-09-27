@@ -91,14 +91,16 @@ type Compaction struct {
 	Content string `json:"content"`
 }
 
-// SystemPrompt records that a resumed session carried on under a different
-// system prompt from the one it was written with — agent.md or the skills it
-// pulls in were edited in between. Every request after this line was sent with
-// Content in place of the prompt the transcript opens with.
+// SystemPrompt records that the conversation carried on under a different
+// system prompt from the one the transcript opens with: a skill was loaded, or
+// the session was resumed after agent.md or its skills were edited. Every
+// request after this line was sent with Content in place of the earlier prompt,
+// and Skills names the on-demand skills Content was composed with.
 type SystemPrompt struct {
-	Type    string `json:"type"` // always "system_prompt"
-	Seq     int    `json:"seq"`
-	Content string `json:"content"`
+	Type    string   `json:"type"` // always "system_prompt"
+	Seq     int      `json:"seq"`
+	Content string   `json:"content"`
+	Skills  []string `json:"skills,omitempty"`
 }
 
 // footer is the last line of a cleanly-closed session file.
@@ -308,23 +310,40 @@ func (w *Writer) writeLine(v any) error {
 	return nil
 }
 
-// Load reads a session file and returns its header plus the reconstructed
-// conversation. A missing footer is fine (partial session). A trailing
-// dangling assistant message — one whose tool_calls have no matching tool
-// result, which happens when a crash lands between the assistant write and the
-// tool result write — is elided so the next provider call sees a valid
-// sequence.
+// Transcript is a session file read back: what a resumed agent continues from.
+type Transcript struct {
+	Header   Header
+	Messages []llm.Message
+	Usage    Usage
+	// Skills are the on-demand skills the conversation had loaded when the
+	// file ends, as the last system prompt line recorded them.
+	Skills []string
+}
+
+// Load reads a session file and returns its header, the reconstructed
+// conversation, and its accumulated usage. See LoadTranscript.
 func Load(dir string, id ID) (Header, []llm.Message, Usage, error) {
+	transcript, err := LoadTranscript(dir, id)
+	return transcript.Header, transcript.Messages, transcript.Usage, err
+}
+
+// LoadTranscript reads a session file and reconstructs the conversation it
+// records. A missing footer is fine (partial session). A trailing dangling
+// assistant message — one whose tool_calls have no matching tool result, which
+// happens when a crash lands between the assistant write and the tool result
+// write — is elided so the next provider call sees a valid sequence.
+func LoadTranscript(dir string, id ID) (Transcript, error) {
 	path := filepath.Join(dir, string(id)+".jsonl")
 	f, err := os.Open(path)
 	if err != nil {
-		return Header{}, nil, Usage{}, fmt.Errorf("session: open %s: %w", path, err)
+		return Transcript{}, fmt.Errorf("session: open %s: %w", path, err)
 	}
 	defer f.Close()
 
 	var hdr Header
 	var msgs []llm.Message
 	var usage Usage
+	var loadedSkills []string
 	answered := map[string]bool{} // tool_call ids that received a tool result
 
 	sc := bufio.NewScanner(f)
@@ -388,6 +407,7 @@ func Load(dir string, id ID) (Header, []llm.Message, Usage, error) {
 				continue
 			}
 			msgs, _ = WithSystemPrompt(msgs, p.Content)
+			loadedSkills = p.Skills
 		case "footer":
 			// Diagnostic only; ignored on read.
 		default:
@@ -395,11 +415,15 @@ func Load(dir string, id ID) (Header, []llm.Message, Usage, error) {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return hdr, nil, Usage{}, fmt.Errorf("session: scan %s: %w", path, err)
+		return Transcript{Header: hdr}, fmt.Errorf("session: scan %s: %w", path, err)
 	}
 
-	msgs = elideDangling(msgs, answered)
-	return hdr, msgs, usage, nil
+	return Transcript{
+		Header:   hdr,
+		Messages: elideDangling(msgs, answered),
+		Usage:    usage,
+		Skills:   loadedSkills,
+	}, nil
 }
 
 // applyCompaction replaces the span a compaction covers with its summary,

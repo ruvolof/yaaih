@@ -1,6 +1,7 @@
 ---
 name: tool-writing
 description: How to author new script tools for this harness.
+always: true
 ---
 You can extend yourself by writing new **script tools**. A tool is two files
 that share a base name: an executable script and a JSON manifest. You author

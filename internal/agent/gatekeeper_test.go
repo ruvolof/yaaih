@@ -11,6 +11,7 @@ import (
 	"github.com/ruvolof/aibitat-harness-go/internal/executor"
 	"github.com/ruvolof/aibitat-harness-go/internal/governor"
 	"github.com/ruvolof/aibitat-harness-go/internal/llm"
+	"github.com/ruvolof/aibitat-harness-go/internal/session"
 )
 
 func newGatedTestAgent(t *testing.T, gate *Gatekeeper, prov llm.Provider, runner executor.Executor) *Agent {
@@ -26,7 +27,7 @@ func newGatedTestAgent(t *testing.T, gate *Gatekeeper, prov llm.Provider, runner
 		},
 	}
 	return New(cfg, prov, governor.New(cfg.Model), governor.New(cfg.Model),
-		runner, nil, gate, nil, nil, t.TempDir())
+		runner, nil, gate, nil, session.Transcript{}, t.TempDir())
 }
 
 // runTurnWithOperator drives a turn with an operator standing at the approval

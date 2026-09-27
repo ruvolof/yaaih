@@ -344,3 +344,26 @@ func TestInvalidRuntimeLimitsAreRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestSkillsKeptOutOfTheAgentPrompt(t *testing.T) {
+	dir := t.TempDir()
+	p := writeAgent(t, dir, "")
+	if err := os.MkdirAll(filepath.Join(dir, "skills"), 0o755); err != nil {
+		t.Fatalf("mkdir skills: %v", err)
+	}
+	skill := "---\nname: lazy\ndescription: loaded when asked\n---\nLAZY BODY\n"
+	if err := os.WriteFile(filepath.Join(dir, "skills", "lazy.md"), []byte(skill), 0o644); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
+
+	cfg, err := Load(p, Overrides{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Skills) != 1 || cfg.Skills[0].Name != "lazy" {
+		t.Fatalf("Skills = %+v, want the one skill in skills/", cfg.Skills)
+	}
+	if cfg.SystemPrompt != "You are a test agent." {
+		t.Errorf("SystemPrompt = %q, want only the agent.md body", cfg.SystemPrompt)
+	}
+}

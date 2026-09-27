@@ -275,9 +275,9 @@ func TestNewFromASeedSendsTheCurrentSystemPrompt(t *testing.T) {
 		original.Send(context.Background(), "remember the number 7")
 	})
 
-	_, seed, _, err := session.Load(sessionsDir, id)
+	seed, err := session.LoadTranscript(sessionsDir, id)
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("LoadTranscript: %v", err)
 	}
 	writer, err := session.OpenForAppend(sessionsDir, id)
 	if err != nil {

@@ -13,6 +13,7 @@ import (
 	"github.com/ruvolof/aibitat-harness-go/internal/executor"
 	"github.com/ruvolof/aibitat-harness-go/internal/governor"
 	"github.com/ruvolof/aibitat-harness-go/internal/llm"
+	"github.com/ruvolof/aibitat-harness-go/internal/session"
 )
 
 // stubProvider replays scripted responses in order and keeps the requests it
@@ -119,7 +120,7 @@ func newTestAgentWithOptions(t *testing.T, caps []string, prov llm.Provider, run
 		Options:      opts,
 	}
 	return New(cfg, prov, governor.New(cfg.Model), governor.New(cfg.Model),
-		runner, nil, NewGatekeeper(false), nil, nil, t.TempDir())
+		runner, nil, NewGatekeeper(false), nil, session.Transcript{}, t.TempDir())
 }
 
 // runTurn drives one turn to completion and returns everything the agent

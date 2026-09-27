@@ -100,18 +100,63 @@ func TestLoadMalformedSkipped(t *testing.T) {
 	}
 }
 
-func TestFormatEmpty(t *testing.T) {
-	if got := Format(nil); got != "" {
-		t.Errorf("Format(nil) = %q, want empty", got)
+func TestLoadAlwaysAndOnDemand(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "a.md", "---\nname: pinned\ndescription: always there\nalways: true\n---\nP\n")
+	writeFile(t, dir, "b.md", "---\nname: lazy\ndescription: loaded when asked\n---\nL\n")
+	writeFile(t, dir, "c.md", "---\nname: undescribed\n---\nU\n")
+
+	ss, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := map[string]bool{"pinned": false, "lazy": true, "undescribed": false}
+	for _, skill := range ss {
+		if skill.OnDemand() != want[skill.Name] {
+			t.Errorf("%s: OnDemand = %v, want %v", skill.Name, skill.OnDemand(), want[skill.Name])
+		}
+	}
+	if !ss[0].Always {
+		t.Errorf("pinned: Always = false, want true")
 	}
 }
 
-func TestFormatWrapsSkills(t *testing.T) {
-	out := Format([]Skill{
-		{Name: "general-style", Body: "line one\nline two"},
+func TestLoadSkipsDuplicateName(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "a.md", "---\nname: same\n---\nfirst\n")
+	writeFile(t, dir, "b.md", "---\nname: same\n---\nsecond\n")
+
+	ss, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(ss) != 1 || ss[0].Body != "first" {
+		t.Fatalf("got %+v, want only the first skill named same", ss)
+	}
+}
+
+func TestFind(t *testing.T) {
+	all := []Skill{{Name: "alpha"}, {Name: "bravo"}}
+	if skill, ok := Find(all, "bravo"); !ok || skill.Name != "bravo" {
+		t.Errorf("Find(bravo) = %+v, %v", skill, ok)
+	}
+	if _, ok := Find(all, "charlie"); ok {
+		t.Errorf("Find(charlie) found a skill that does not exist")
+	}
+}
+
+func TestComposeWithoutSkillsReturnsBase(t *testing.T) {
+	if got := Compose("base prompt", nil, nil); got != "base prompt" {
+		t.Errorf("Compose = %q, want the base unchanged", got)
+	}
+}
+
+func TestComposeEagerSkillsOnly(t *testing.T) {
+	out := Compose("base", []Skill{
+		{Name: "general-style", Body: "line one\nline two", Always: true},
 		{Name: "network-debug", Body: "use curl -m 5"},
-	})
-	want := "<skills>\n" +
+	}, nil)
+	want := "base\n\n<skills>\n" +
 		"<skill name=\"general-style\">\n" +
 		"line one\nline two\n" +
 		"</skill>\n" +
@@ -120,9 +165,47 @@ func TestFormatWrapsSkills(t *testing.T) {
 		"</skill>\n" +
 		"</skills>"
 	if out != want {
-		t.Errorf("Format mismatch:\n got: %q\nwant: %q", out, want)
+		t.Errorf("Compose mismatch:\n got: %q\nwant: %q", out, want)
 	}
-	if !strings.HasPrefix(out, "<skills>") || !strings.HasSuffix(out, "</skills>") {
-		t.Errorf("Format not wrapped in <skills>: %q", out)
+}
+
+func TestComposeCatalogsOnDemandSkills(t *testing.T) {
+	out := Compose("base", []Skill{
+		{Name: "lazy", Description: "for lazy things", Body: "LAZY BODY"},
+	}, nil)
+	want := "base\n\n<available_skills>\n" + catalogIntro + "\n" +
+		"<skill name=\"lazy\">for lazy things</skill>\n" +
+		"</available_skills>"
+	if out != want {
+		t.Errorf("Compose mismatch:\n got: %q\nwant: %q", out, want)
+	}
+}
+
+func TestComposeLoadedSkillMovesFromCatalogToBodies(t *testing.T) {
+	all := []Skill{
+		{Name: "alpha", Description: "first", Body: "ALPHA BODY"},
+		{Name: "bravo", Description: "second", Body: "BRAVO BODY"},
+		{Name: "charlie", Description: "third", Body: "CHARLIE BODY"},
+	}
+	out := Compose("base", all, []string{"charlie", "alpha"})
+
+	if strings.Contains(out, `<skill name="alpha">first</skill>`) {
+		t.Errorf("loaded skill still listed in the catalog:\n%s", out)
+	}
+	if !strings.Contains(out, `<skill name="bravo">second</skill>`) {
+		t.Errorf("unloaded skill missing from the catalog:\n%s", out)
+	}
+	if strings.Contains(out, "BRAVO BODY") {
+		t.Errorf("unloaded skill's body is in the prompt:\n%s", out)
+	}
+	alpha, charlie := strings.Index(out, "ALPHA BODY"), strings.Index(out, "CHARLIE BODY")
+	if alpha < 0 || charlie < 0 {
+		t.Fatalf("loaded skills' bodies missing:\n%s", out)
+	}
+	if alpha > charlie {
+		t.Errorf("bodies follow load order rather than skill order:\n%s", out)
+	}
+	if again := Compose("base", all, []string{"alpha", "charlie"}); again != out {
+		t.Errorf("the same set of loaded skills composed two different prompts")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,6 +66,10 @@ type Agent struct {
 	mu       sync.Mutex
 	messages []llm.Message
 
+	// loadedSkills are the on-demand skills this session has loaded, in the
+	// order they were loaded. Guarded by mu.
+	loadedSkills []string
+
 	// dropThrough is how far the context window has advanced into messages,
 	// shrunkResults how many tool results it has had to rewrite to fit, and
 	// calibration the estimator's correction against the token counts the
@@ -94,11 +99,12 @@ type Agent struct {
 	eventsClosed bool
 }
 
-// New builds an Agent. When seed is non-empty it is used as the starting
+// New builds an Agent. When seed has messages it is used as the starting
 // conversation (the resume path; seed is assumed to already be on disk), opened
-// with the system prompt cfg carries now rather than the one seed was written
-// with; otherwise the agent is seeded with the system prompt and that message
-// is persisted as the first entry. writer may be nil to disable persistence.
+// with the system prompt cfg and the skills seed had loaded compose now rather
+// than the one seed was written with; otherwise the agent is seeded with the
+// system prompt and that message is persisted as the first entry. writer may be
+// nil to disable persistence.
 func New(
 	cfg *config.Config,
 	prov llm.Provider,
@@ -108,14 +114,9 @@ func New(
 	br *browser.Browser,
 	gate *Gatekeeper,
 	writer *session.Writer,
-	seed []llm.Message,
+	seed session.Transcript,
 	sessionsDir string,
 ) *Agent {
-	msgs := []llm.Message{{Role: llm.RoleSystem, Content: cfg.SystemPrompt}}
-	promptChanged := false
-	if len(seed) > 0 {
-		msgs, promptChanged = withCurrentSystemPrompt(seed, cfg.SystemPrompt)
-	}
 	a := &Agent{
 		cfg:         cfg,
 		prov:        prov,
@@ -129,17 +130,23 @@ func New(
 		sessionsDir: sessionsDir,
 		events:      make(chan Event, 32),
 		closing:     make(chan struct{}),
-		messages:    msgs,
 	}
-	if len(seed) > 0 {
+	if len(seed.Messages) > 0 {
 		// Resumed: the seed is already on disk; continue numbering after it.
-		a.seq = int64(len(seed))
+		a.loadedSkills = a.adoptLoadedSkills(seed.Skills)
+		var promptChanged bool
+		a.messages, promptChanged = withCurrentSystemPrompt(seed.Messages, a.systemPrompt())
+		a.seq = int64(len(seed.Messages))
 		if promptChanged {
 			a.persistSystemPrompt()
 		}
 	} else {
 		// Fresh: persist the system message as seq 1.
-		a.persist(msgs[0], nil)
+		a.messages = []llm.Message{{Role: llm.RoleSystem, Content: a.systemPrompt()}}
+		a.persist(a.messages[0], nil)
+	}
+	if len(a.onDemandSkillNames()) > 0 {
+		a.registry.Add(a.skillLoadTool())
 	}
 	// Forward gatekeeper requests onto the event stream so the TUI sees them.
 	go func() {
@@ -231,7 +238,7 @@ func (a *Agent) NewSession() (session.ID, error) {
 		return "", fmt.Errorf("create session: %w", err)
 	}
 	a.closeWriter("switched")
-	a.resetConversation(w, nil)
+	a.resetConversation(w, session.Transcript{})
 	log.Info("started new session", "id", id)
 	return id, nil
 }
@@ -248,7 +255,7 @@ func (a *Agent) ResumeSession(id session.ID) ([]llm.Message, error) {
 	}
 	defer a.turnMu.Unlock()
 
-	_, msgs, usage, err := session.Load(a.sessionsDir, id)
+	transcript, err := session.LoadTranscript(a.sessionsDir, id)
 	if err != nil {
 		return nil, err
 	}
@@ -257,11 +264,12 @@ func (a *Agent) ResumeSession(id session.ID) ([]llm.Message, error) {
 		return nil, fmt.Errorf("reopen %s: %w", id, err)
 	}
 	a.closeWriter("switched")
-	a.resetConversation(w, msgs)
+	a.resetConversation(w, transcript)
 	// Restore the resumed session's accumulated usage (resetConversation zeroed
 	// it). Only the session governor — the run total is not rewound.
+	usage := transcript.Usage
 	a.gov.Seed(usage.InputTokens, usage.OutputTokens, usage.Cost, usage.CostAvailable)
-	log.Info("resumed session", "id", id, "messages", len(msgs))
+	log.Info("resumed session", "id", id, "messages", len(transcript.Messages))
 	return a.snapshotMessages(), nil
 }
 
@@ -306,18 +314,25 @@ func (a *Agent) closeWriter(reason string) {
 	}
 }
 
-// resetConversation replaces the conversation history, the session writer, and
-// the sequence counter. With an empty seed it starts fresh from the system
-// prompt and persists it as the first entry; otherwise it adopts seed (already
-// on disk) under the current system prompt and continues numbering after it.
-func (a *Agent) resetConversation(w *session.Writer, seed []llm.Message) {
+// resetConversation replaces the conversation history, the loaded skills, the
+// session writer, and the sequence counter. With an empty seed it starts fresh
+// from the system prompt, with no skills loaded, and persists it as the first
+// entry; otherwise it adopts seed (already on disk) and the skills it had
+// loaded under the current system prompt and continues numbering after it.
+func (a *Agent) resetConversation(w *session.Writer, seed session.Transcript) {
 	promptChanged := false
+	var loaded []string
+	if len(seed.Messages) > 0 {
+		loaded = a.adoptLoadedSkills(seed.Skills)
+	}
+	prompt := a.composeSystemPrompt(loaded)
 	a.mu.Lock()
-	if len(seed) > 0 {
-		a.messages, promptChanged = withCurrentSystemPrompt(seed, a.cfg.SystemPrompt)
-		atomic.StoreInt64(&a.seq, int64(len(seed)))
+	a.loadedSkills = loaded
+	if len(seed.Messages) > 0 {
+		a.messages, promptChanged = withCurrentSystemPrompt(seed.Messages, prompt)
+		atomic.StoreInt64(&a.seq, int64(len(seed.Messages)))
 	} else {
-		a.messages = []llm.Message{{Role: llm.RoleSystem, Content: a.cfg.SystemPrompt}}
+		a.messages = []llm.Message{{Role: llm.RoleSystem, Content: prompt}}
 		atomic.StoreInt64(&a.seq, 0)
 	}
 	a.writer = w
@@ -331,7 +346,7 @@ func (a *Agent) resetConversation(w *session.Writer, seed []llm.Message) {
 	// the loaded transcript afterwards. The global (run) governor is untouched.
 	a.gov.Reset()
 	a.gate.RevokeAllowances()
-	if len(seed) == 0 {
+	if len(seed.Messages) == 0 {
 		a.persist(a.messages[0], nil) // seq -> 1
 	}
 	if promptChanged {
@@ -340,9 +355,9 @@ func (a *Agent) resetConversation(w *session.Writer, seed []llm.Message) {
 }
 
 // withCurrentSystemPrompt opens a resumed conversation with the system prompt
-// the agent is configured with now. A transcript keeps the prompt it was
-// written with, but agent.md and its skills are what gets edited between runs,
-// and resuming a session is how an edit gets tried out.
+// the agent composes now. A transcript keeps the prompt it was written with,
+// but agent.md and its skills are what gets edited between runs, and resuming a
+// session is how an edit gets tried out.
 func withCurrentSystemPrompt(seed []llm.Message, prompt string) ([]llm.Message, bool) {
 	messages, changed := session.WithSystemPrompt(seed, prompt)
 	if changed {
@@ -354,17 +369,21 @@ func withCurrentSystemPrompt(seed []llm.Message, prompt string) ([]llm.Message, 
 }
 
 // persistSystemPrompt records in the session file that the conversation now
-// opens with the configured system prompt, so the transcript replays as what
-// was actually sent from here on.
+// opens with the current system prompt and the skills it was composed with, so
+// the transcript replays as what was actually sent from here on and a resumed
+// session gets its skills back.
 func (a *Agent) persistSystemPrompt() {
 	writer := a.currentWriter()
 	if writer == nil {
 		return
 	}
-	seq := int(atomic.AddInt64(&a.seq, 1))
-	err := writer.AppendSystemPrompt(session.SystemPrompt{Seq: seq, Content: a.cfg.SystemPrompt})
+	a.mu.Lock()
+	record := session.SystemPrompt{Content: a.messages[0].Content, Skills: slices.Clone(a.loadedSkills)}
+	a.mu.Unlock()
+	record.Seq = int(atomic.AddInt64(&a.seq, 1))
+	err := writer.AppendSystemPrompt(record)
 	if err != nil {
-		log.Warn("session system prompt append failed", "err", err, "seq", seq)
+		log.Warn("session system prompt append failed", "err", err, "seq", record.Seq)
 	}
 }
 

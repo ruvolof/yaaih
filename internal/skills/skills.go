@@ -1,9 +1,13 @@
 // Package skills loads markdown "skill" files from a directory next to the
-// agent.md and renders them into a single block appended to the system prompt.
+// agent.md and composes them into the system prompt.
 //
 // A skill is *policy*, not *capability*. It teaches the model conventions,
-// guardrails, or workflows; it does not add anything to the tool list. Skills
-// are loaded once at startup — there is no hot reload in this batch.
+// guardrails, or workflows; it does not add anything to the tool list.
+//
+// Most skills are loaded on demand: the system prompt carries only their name
+// and description, and a skill's body joins it once the model or the operator
+// asks for it. A skill marked always, or one without a description for the
+// model to choose it by, is part of the system prompt from the start.
 package skills
 
 import (
@@ -29,13 +33,20 @@ type Skill struct {
 	Description string
 	Path        string // absolute path to the source file
 	Body        string // markdown body, trimmed
+	Always      bool
 	Disabled    bool
 }
+
+// OnDemand reports whether the skill waits to be loaded rather than being part
+// of the system prompt from the start. A skill without a description cannot be
+// on demand: the description is all the model has to decide by.
+func (s Skill) OnDemand() bool { return !s.Always && s.Description != "" }
 
 // skillFrontmatter is the YAML header of a skill file.
 type skillFrontmatter struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
+	Always      bool   `yaml:"always"`
 	Disabled    bool   `yaml:"disabled"`
 }
 
@@ -63,17 +74,28 @@ func Load(dir string) ([]Skill, error) {
 	sort.Strings(names)
 
 	var out []Skill
+	seen := map[string]string{}
 	for _, name := range names {
 		abs := filepath.Join(dir, name)
-		sk, ok := loadOne(abs)
+		skill, ok := loadOne(abs)
 		if !ok {
 			continue
 		}
-		if sk.Disabled {
-			log.Info("skill disabled, skipping", "path", abs, "name", sk.Name)
+		if skill.Disabled {
+			log.Info("skill disabled, skipping", "path", abs, "name", skill.Name)
 			continue
 		}
-		out = append(out, sk)
+		// The name is what the model and the operator load a skill by, so a
+		// second skill answering to it could never be reached.
+		if first, taken := seen[skill.Name]; taken {
+			log.Warn("skill name already used, skipping", "path", abs, "name", skill.Name, "first", first)
+			continue
+		}
+		seen[skill.Name] = abs
+		if !skill.Always && skill.Description == "" {
+			log.Info("skill has no description, loading it from the start", "path", abs, "name", skill.Name)
+		}
+		out = append(out, skill)
 	}
 	return out, nil
 }
@@ -113,6 +135,7 @@ func loadOne(abs string) (Skill, bool) {
 		Description: strings.TrimSpace(meta.Description),
 		Path:        abs,
 		Body:        strings.TrimSpace(extractBody(raw)),
+		Always:      meta.Always,
 		Disabled:    meta.Disabled,
 	}, true
 }
@@ -138,26 +161,61 @@ func extractBody(raw []byte) string {
 	return body
 }
 
-// Format renders skills as a single block to append to a system prompt.
-// Returns "" if skills is empty. The shape is deterministic and easy for the
-// model to parse:
+// Find returns the skill called name.
+func Find(all []Skill, name string) (Skill, bool) {
+	for _, skill := range all {
+		if skill.Name == name {
+			return skill, true
+		}
+	}
+	return Skill{}, false
+}
+
+// catalogIntro tells the model what the catalog is and what to do with it.
+const catalogIntro = "Skills are instructions for particular kinds of task. Before you start a task that " +
+	"matches one of the descriptions below, call skill_load with its name: its instructions then join " +
+	"this system prompt for the rest of the session."
+
+// Compose builds the system prompt from the agent's own prompt and its skills:
+// a catalog of the on-demand skills not loaded yet, then the bodies of the
+// skills that are in effect — those loaded from the start, and those named in
+// loaded. Either block is left out when it would be empty, so an agent without
+// skills gets base back unchanged.
+//
+// Bodies follow the order of all rather than the order skills were loaded in,
+// so the same set of skills always produces the same prompt:
+//
+//	<available_skills>
+//	...intro...
+//	<skill name="network-debug">description</skill>
+//	</available_skills>
 //
 //	<skills>
 //	<skill name="general-style">
 //	...body...
 //	</skill>
 //	</skills>
-func Format(skills []Skill) string {
-	if len(skills) == 0 {
-		return ""
+func Compose(base string, all []Skill, loaded []string) string {
+	isLoaded := make(map[string]bool, len(loaded))
+	for _, name := range loaded {
+		isLoaded[name] = true
 	}
-	var b strings.Builder
-	b.WriteString("<skills>\n")
-	for _, s := range skills {
-		fmt.Fprintf(&b, "<skill name=%q>\n", s.Name)
-		b.WriteString(s.Body)
-		b.WriteString("\n</skill>\n")
+
+	var catalog, bodies strings.Builder
+	for _, skill := range all {
+		if skill.OnDemand() && !isLoaded[skill.Name] {
+			fmt.Fprintf(&catalog, "<skill name=%q>%s</skill>\n", skill.Name, skill.Description)
+			continue
+		}
+		fmt.Fprintf(&bodies, "<skill name=%q>\n%s\n</skill>\n", skill.Name, skill.Body)
 	}
-	b.WriteString("</skills>")
-	return b.String()
+
+	prompt := base
+	if catalog.Len() > 0 {
+		prompt += "\n\n<available_skills>\n" + catalogIntro + "\n" + catalog.String() + "</available_skills>"
+	}
+	if bodies.Len() > 0 {
+		prompt += "\n\n<skills>\n" + bodies.String() + "</skills>"
+	}
+	return prompt
 }

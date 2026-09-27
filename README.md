@@ -258,6 +258,47 @@ Your Markdown system prompt goes here.
 
 Anything after the YAML frontmatter is treated as the agent's system prompt.
 
+### Skills
+
+A skill is a Markdown file in the agent's `skills/` folder (or wherever `skills:`
+/ `--skills-dir` points). It teaches the model a convention or a workflow; it
+adds nothing to the tool list. Each file opens with YAML frontmatter:
+
+```markdown
+---
+name: network-debug          # what the skill is loaded by; defaults to the filename
+description: Diagnosing DNS, TLS and timeout problems from inside the sandbox.
+always: false                # true puts it in the system prompt from the start
+disabled: false              # true ignores the file
+---
+Always pass `-m 5` to curl so a dead host cannot hang the shell...
+```
+
+Skills are loaded **on demand**. The system prompt carries only a catalog of
+each skill's name and description, and a skill's body joins the system prompt
+once it is needed, for the rest of the session:
+
+- The **model** calls the `skill_load` tool when a task matches a description.
+  The tool is offered only to agents that have a skill to load, and it needs no
+  approval.
+- The **operator** runs `/skill <name>`. `/skills` lists every skill as
+  `available`, `loaded`, or `always`.
+
+A skill with `always: true` is in the system prompt from the start, and so is a
+skill without a `description`, because the model has nothing to choose it by.
+The shipped `tool-writer` agent keeps its one skill always loaded.
+
+A loaded skill lives in the system prompt, which neither the context window nor
+`/compact` ever drops, so it stays in effect however long the session runs.
+There is no unloading; `/new` starts again with none loaded. The session file
+records every load, so `/resume` and `--resume` bring the session's skills back,
+composed from the skill files as they are now. A skill that has since been
+deleted, renamed, or made `always` is dropped with a warning in the log.
+
+Loading a skill changes the system prompt, so providers that cache the prompt
+prefix re-read the conversation once at full price. Most skills are loaded near
+the start of a session, while the conversation is short.
+
 ## 5) Supported configuration fields
 
 From `internal/config/config.go`:
@@ -565,7 +606,8 @@ events (each `executor send`, every agent iteration counter, cwd changes).
 | `executor`  | bash session started (container id, cwd, timeout), each command result (bytes, elapsed)  |
 | `browser`   | CDP connected, navigate, screenshot saved (path)                                         |
 | `llm`       | provider configured, request sent (model, msgs, tools), first chunk latency, stream done (tokens, chunks, elapsed), errors |
-| `agent`     | turn start (user msg len, history depth), tool calls dispatched, tool ok / failed, denied by operator, max iterations |
+| `agent`     | turn start (user msg len, history depth), tool calls dispatched, tool ok / failed, denied by operator, max iterations, skill loaded (name, by model or operator) |
+| `skills`    | skill disabled, skill name already used, skill without a description loaded from the start |
 | `gatekeeper`| approval requested, approved, denied                                                     |
 | `governor`  | per-turn usage delta + running totals                                                    |
 | `panic`     | goroutine panics — value + full stack                                                    |

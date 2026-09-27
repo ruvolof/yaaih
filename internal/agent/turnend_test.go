@@ -24,7 +24,7 @@ func newOverBudgetAgent(t *testing.T) *Agent {
 		Options:      windowedOptions(100),
 	}
 	return New(cfg, &stubProvider{}, governor.New(cfg.Model), governor.New(cfg.Model),
-		nil, nil, NewGatekeeper(false), nil, nil, t.TempDir())
+		nil, nil, NewGatekeeper(false), nil, session.Transcript{}, t.TempDir())
 }
 
 // A turn ends with exactly one AssistantDoneMsg however it ends. The UI reports

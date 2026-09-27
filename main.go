@@ -271,7 +271,7 @@ func buildAgentRuntime(ctx context.Context, agentDir, resumeID string, newSessio
 	// 3. Session persistence: resume a prior transcript or start a new one. When
 	// resuming, seed the session governor with the transcript's accumulated
 	// usage so the per-session cost continues where it left off.
-	sessWriter, seed, seedUsage, err := setupSession(resumeID, newSession, cfg, cfg.SessionsDir)
+	sessWriter, seed, err := setupSession(resumeID, newSession, cfg, cfg.SessionsDir)
 	if err != nil {
 		dockerCleanup()
 		if runner != nil {
@@ -282,8 +282,8 @@ func buildAgentRuntime(ctx context.Context, agentDir, resumeID string, newSessio
 		}
 		return nil, fmt.Errorf("session: %w", err)
 	}
-	if len(seed) > 0 {
-		gov.Seed(seedUsage.InputTokens, seedUsage.OutputTokens, seedUsage.Cost, seedUsage.CostAvailable)
+	if len(seed.Messages) > 0 {
+		gov.Seed(seed.Usage.InputTokens, seed.Usage.OutputTokens, seed.Usage.Cost, seed.Usage.CostAvailable)
 	}
 
 	// 4. Agent.
@@ -382,36 +382,37 @@ func setupRuntime(ctx context.Context, cfg *config.Config) (executor.Executor, *
 }
 
 // setupSession wires up transcript persistence. When resumeID is set it loads
-// the prior transcript (the seed, plus its accumulated usage) and reopens that
-// file for appending. When resumeID is empty and newSession is true it creates
-// a fresh session file with a header. Returns nil writer and zero usage when
-// persistence is disabled.
+// the prior transcript (its messages, accumulated usage, and loaded skills) and
+// reopens that file for appending. When resumeID is empty and newSession is
+// true it creates a fresh session file with a header. Returns nil writer and an
+// empty transcript when persistence is disabled.
 //
 // sessionsDir is the directory holding this agent's transcripts (cfg.SessionsDir,
 // default <agent folder>/sessions).
-func setupSession(resumeID string, newSession bool, cfg *config.Config, sessionsDir string) (*session.Writer, []llm.Message, session.Usage, error) {
+func setupSession(resumeID string, newSession bool, cfg *config.Config, sessionsDir string) (*session.Writer, session.Transcript, error) {
 	log := logging.For("main")
 
 	if resumeID != "" {
-		hdr, seed, usage, err := session.Load(sessionsDir, session.ID(resumeID))
+		seed, err := session.LoadTranscript(sessionsDir, session.ID(resumeID))
 		if err != nil {
-			return nil, nil, session.Usage{}, fmt.Errorf("resume %s: %w", resumeID, err)
+			return nil, session.Transcript{}, fmt.Errorf("resume %s: %w", resumeID, err)
 		}
 		w, err := session.OpenForAppend(sessionsDir, session.ID(resumeID))
 		if err != nil {
-			return nil, nil, session.Usage{}, fmt.Errorf("reopen %s: %w", resumeID, err)
+			return nil, session.Transcript{}, fmt.Errorf("reopen %s: %w", resumeID, err)
 		}
 		log.Info("session resumed",
 			"id", resumeID,
-			"messages", len(seed),
-			"header_model", hdr.Model,
+			"messages", len(seed.Messages),
+			"skills", seed.Skills,
+			"header_model", seed.Header.Model,
 		)
-		return w, seed, usage, nil
+		return w, seed, nil
 	}
 
 	if !newSession {
 		log.Info("session persistence disabled (--new-session=false)")
-		return nil, nil, session.Usage{}, nil
+		return nil, session.Transcript{}, nil
 	}
 
 	id := session.NewID()
@@ -423,10 +424,10 @@ func setupSession(resumeID string, newSession bool, cfg *config.Config, sessions
 		Provider:  cfg.Provider.BaseURL,
 	})
 	if err != nil {
-		return nil, nil, session.Usage{}, fmt.Errorf("create session: %w", err)
+		return nil, session.Transcript{}, fmt.Errorf("create session: %w", err)
 	}
 	log.Info("session started", "id", id, "path", filepath.Join(sessionsDir, string(id)+".jsonl"))
-	return w, nil, session.Usage{}, nil
+	return w, session.Transcript{}, nil
 }
 
 func runtimeRequired(cfg *config.Config) bool {

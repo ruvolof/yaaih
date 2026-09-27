@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -496,6 +497,69 @@ func TestLoadReplaysASystemPromptChange(t *testing.T) {
 		if msgs[i].Role != want[i].Role || msgs[i].Content != want[i].Content {
 			t.Errorf("message %d = %+v, want %+v", i, msgs[i], want[i])
 		}
+	}
+}
+
+func TestLoadTranscriptKeepsTheLastRecordedSkills(t *testing.T) {
+	base := t.TempDir()
+	id := ID("20260605-101122-sklA")
+	w, err := NewWriter(base, testHeader(id))
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	appendMessages(t, w, []llm.Message{
+		{Role: llm.RoleSystem, Content: "prompt with no skills"},
+		{Role: llm.RoleUser, Content: "check the network"},
+	})
+	for seq, record := range []SystemPrompt{
+		{Content: "prompt with network-debug", Skills: []string{"network-debug"}},
+		{Content: "prompt with both", Skills: []string{"network-debug", "style"}},
+	} {
+		record.Seq = 3 + seq
+		if err := w.AppendSystemPrompt(record); err != nil {
+			t.Fatalf("AppendSystemPrompt: %v", err)
+		}
+	}
+	if err := w.Close("clean"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	transcript, err := LoadTranscript(base, id)
+	if err != nil {
+		t.Fatalf("LoadTranscript: %v", err)
+	}
+	if got := strings.Join(transcript.Skills, ","); got != "network-debug,style" {
+		t.Errorf("Skills = %v, want the last record's", transcript.Skills)
+	}
+	if transcript.Messages[0].Content != "prompt with both" {
+		t.Errorf("system prompt = %q, want the last record's", transcript.Messages[0].Content)
+	}
+	if transcript.Header.ID != id {
+		t.Errorf("Header.ID = %q, want %q", transcript.Header.ID, id)
+	}
+}
+
+func TestLoadTranscriptWithoutSkillRecords(t *testing.T) {
+	base := t.TempDir()
+	id := ID("20260605-101122-sklB")
+	w, err := NewWriter(base, testHeader(id))
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	appendMessages(t, w, []llm.Message{{Role: llm.RoleSystem, Content: "prompt"}})
+	if err := w.AppendSystemPrompt(SystemPrompt{Seq: 2, Content: "edited prompt"}); err != nil {
+		t.Fatalf("AppendSystemPrompt: %v", err)
+	}
+	if err := w.Close("clean"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	transcript, err := LoadTranscript(base, id)
+	if err != nil {
+		t.Fatalf("LoadTranscript: %v", err)
+	}
+	if transcript.Skills != nil {
+		t.Errorf("Skills = %v, want none", transcript.Skills)
 	}
 }
 
