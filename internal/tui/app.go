@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -119,7 +118,8 @@ type Model struct {
 	toast        string
 	toastVersion int // monotonic; lets stale Ticks find their toast already replaced
 
-	input textinput.Model
+	input        inputBox
+	inputHistory *InputHistory
 
 	sessionStats governor.Stats // current session's token/cost usage
 	globalStats  governor.Stats // whole-run usage (accumulates across agent switches)
@@ -167,18 +167,18 @@ func renderTick() tea.Cmd {
 
 // New constructs the TUI model. Pass the cancellable context the program is
 // using; agent.Send is invoked off the BubbleTea loop with the same context.
+// inputHistory is shared by every Model of the run, so ↑ reaches inputs sent
+// to agents used before a switch; nil starts an empty one.
 //
 // Returns a *Model so the same allocation lives across every Update/View
 // pass. Returning Model by value would cause BubbleTea to copy the struct
 // each iteration, and the strings.Builder fields cache a self-pointer via
 // noescape(unsafe.Pointer); a stale copy of that pointer is what triggered a
 // "found bad pointer in Go heap" GC crash on the first chat message.
-func New(ctx context.Context, cfg *config.Config, ag *agent.Agent, runner executor.Executor, agentsDir, currentAgent string) *Model {
-	ti := textinput.New()
-	ti.Placeholder = "Type your message... (Ctrl+C to quit)"
-	ti.Focus()
-	ti.CharLimit = 4096
-	ti.Width = 80
+func New(ctx context.Context, cfg *config.Config, ag *agent.Agent, runner executor.Executor, agentsDir, currentAgent string, inputHistory *InputHistory) *Model {
+	if inputHistory == nil {
+		inputHistory = NewInputHistory()
+	}
 
 	vp := viewport.New(80, 20)
 	vp.SetContent("")
@@ -191,7 +191,8 @@ func New(ctx context.Context, cfg *config.Config, ag *agent.Agent, runner execut
 		agentsDir:    agentsDir,
 		currentAgent: currentAgent,
 		chat:         vp,
-		input:        ti,
+		input:        newInputBox(80),
+		inputHistory: inputHistory,
 	}
 	if cfg != nil {
 		m.sessionStats = governor.Stats{Model: cfg.Model}
@@ -393,13 +394,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chat.GotoBottom()
 			m.userScrolled = false
 			return m, tea.Batch(cmds...)
+		case "tab":
+			m.completeInputOnTab()
+			return m, tea.Batch(cmds...)
+		case "up", "down":
+			if m.recallInput(msg.String()) {
+				return m, tea.Batch(cmds...)
+			}
+			cmds = append(cmds, m.updateInput(msg))
 		case "enter":
 			text := strings.TrimSpace(m.input.Value())
+			m.inputHistory.record(text)
 			if text != "" && strings.HasPrefix(text, "/") {
 				// Slash command: dispatch to a built-in handler instead of
 				// sending the text to the agent.
 				name, args := splitCommand(text)
-				m.input.SetValue("")
+				m.setInput("")
 				if cmd, ok := lookupCommand(name); ok {
 					// Echo the command into the chat for visibility / history,
 					// styled distinctly from regular user messages.
@@ -417,7 +427,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Agent-less: there is nothing to send to. Point the operator
 				// at the picker.
 				m.appendLine(styleErr.Render("no agent selected — use /new <agent> (see /agents)"))
-				m.input.SetValue("")
+				m.setInput("")
 				return m, tea.Batch(cmds...)
 			}
 			if text != "" {
@@ -428,7 +438,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// visible area and the user thinks the UI froze.
 				m.userScrolled = false
 				m.appendLine(styleUser.Render("You: ") + text)
-				m.input.SetValue("")
+				m.setInput("")
 				// The cmd goroutine runs alongside the bubbletea event loop,
 				// so capture only the pointer-stable fields it needs — never
 				// m itself, since that would pin the whole TUI model into a
@@ -439,9 +449,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}))
 			}
 		default:
-			var cmd tea.Cmd
-			m.input, cmd = m.input.Update(msg)
-			cmds = append(cmds, cmd)
+			cmds = append(cmds, m.updateInput(msg))
 		}
 
 	case agent.AssistantDeltaMsg:
@@ -566,7 +574,7 @@ func (m *Model) View() string {
 	if chatW < 20 {
 		chatW = 20
 	}
-	inputH := 3
+	inputH := m.input.Height() + 2
 	// One-row status line between the main area and the input. Always
 	// rendered (empty when idle) so layout doesn't shift the chat as the
 	// agent transitions in and out of busy.
@@ -603,9 +611,9 @@ func (m *Model) View() string {
 	return styleApp.Render(full)
 }
 
-// relayout adjusts inner viewport/input widths after a WindowSizeMsg. The
-// actual wrap-cache rebuild happens inside renderChat when it notices the
-// width has changed.
+// relayout adjusts inner viewport/input sizes after a WindowSizeMsg or a change
+// in the input box's height. The actual wrap-cache rebuild happens inside
+// renderChat when it notices the width has changed.
 func (m *Model) relayout() {
 	sidebarW := m.width / 4
 	if sidebarW < 28 {
@@ -615,11 +623,11 @@ func (m *Model) relayout() {
 	if chatW < 20 {
 		chatW = 20
 	}
-	inputH := 3
+	m.input.SetWidth(m.width - 6)
+	inputH := m.input.Height() + 2
 	statusH := 1
 	m.chat.Width = chatW
 	m.chat.Height = m.height - inputH - statusH - 4
-	m.input.Width = m.width - 6
 	m.renderChat()
 }
 
@@ -711,6 +719,51 @@ func (m *Model) quit() tea.Cmd {
 		m.cancelTurn()
 	}
 	return tea.Quit
+}
+
+// updateInput passes a key to the input box, making room for it in the layout
+// when what was typed changed its height.
+func (m *Model) updateInput(msg tea.Msg) tea.Cmd {
+	cmd, resized := m.input.Update(msg)
+	if resized && m.width > 0 {
+		m.relayout()
+	}
+	return cmd
+}
+
+// setInput replaces what is in the input box.
+func (m *Model) setInput(text string) {
+	if m.input.SetValue(text) && m.width > 0 {
+		m.relayout()
+	}
+}
+
+// recallInput walks the input history for ↑ ("up") or ↓ ("down"), reporting
+// whether it did. It does not when the input holds text of the operator's own,
+// and the key then moves the cursor instead.
+func (m *Model) recallInput(direction string) bool {
+	walk := m.inputHistory.previous
+	if direction == "down" {
+		walk = m.inputHistory.next
+	}
+	entry, ok := walk(m.input.Value())
+	if ok {
+		m.setInput(entry)
+	}
+	return ok
+}
+
+// completeInputOnTab completes the slash command in the input box, listing the
+// candidates in the conversation when there is no single way to go on.
+func (m *Model) completeInputOnTab() {
+	current := m.input.Value()
+	completed, candidates := m.completeInput(current)
+	if completed != current {
+		m.setInput(completed)
+	}
+	if len(candidates) > 0 {
+		m.appendLine(renderCompletions(candidates))
+	}
 }
 
 // refuseIfBusy reports whether a turn is in flight and, if so, prints a notice
@@ -948,6 +1001,7 @@ func (m *Model) renderSidebar() string {
 	if m.toast != "" {
 		fmt.Fprintln(&b, styleOK.Render(truncate(m.toast, 26)))
 	}
+	fmt.Fprintln(&b, styleMuted.Render("↑/↓ history  tab complete"))
 	fmt.Fprintln(&b, styleMuted.Render("^y copy reply"))
 	fmt.Fprintln(&b, styleMuted.Render("^t copy chat"))
 	fmt.Fprintln(&b, styleMuted.Render("pgup/pgdn scroll"))

@@ -145,6 +145,8 @@ func run(agentsRoot, initialAgent, resumeID string, newSession bool, overrides c
 	// per-session governor is created fresh inside each build.
 	globalGov := governor.New("")
 
+	inputHistory := tui.NewInputHistory()
+
 	current := initialAgent
 	resume := resumeID // resume id for the next build (launch agent only at first)
 	first := true
@@ -175,7 +177,7 @@ func run(agentsRoot, initialAgent, resumeID string, newSession bool, overrides c
 		}
 
 		log.Info("starting TUI event loop", "agent", current)
-		model := tui.New(rootCtx, cfg, ag, runner, agentsRoot, current)
+		model := tui.New(rootCtx, cfg, ag, runner, agentsRoot, current, inputHistory)
 		// WithMouseCellMotion enables wheel events (and click/drag, which we
 		// ignore). This means the terminal no longer handles native click-drag
 		// selection in the app window — that's why we expose the clipboard via

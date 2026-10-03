@@ -156,6 +156,12 @@ This starts with **no agent selected** and shows the available agents. From the 
 
 Switching agents starts a clean session; sessions are per-agent, so `/resume` only reaches the current agent's history. (`--agent <folder>` also enables `/agents`/`/new <other>` for that folder's siblings — it just selects one at startup instead of starting agent-less.)
 
+### Typing in the input box
+
+- **Enter** sends; **Alt+Enter** or **Ctrl+J** starts a new line. The box grows with what you type, up to 8 rows, then scrolls. Pasted text keeps its line breaks.
+- **↑ / ↓** walk back and forth through what you have sent, slash commands included, when the box is empty or still holds an entry you recalled unchanged. Once you edit it, the arrows move the cursor again. The history lasts the whole run, across agent switches.
+- **Tab** completes slash commands, and the argument of `/resume` (every agent's sessions), `/new` (agents), `/skill` (skills not loaded yet), and `/sessions` (`all`). When there is more than one match, Tab fills in as much as the matches share, then lists them.
+
 ### Docker runtime
 
 The harness uses Docker to run tool execution in a sandbox container.

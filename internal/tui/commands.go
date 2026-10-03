@@ -16,6 +16,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -33,6 +34,9 @@ type Command struct {
 	Aliases     []string
 	Description string
 	Handler     func(m *Model, args string) tea.Cmd
+	// Complete lists the values the command's argument can take, for Tab to
+	// complete against. Nil for a command whose argument has no such list.
+	Complete func(m *Model) []string
 }
 
 // commandTable is the singleton registry of built-in commands, keyed by name
@@ -66,8 +70,8 @@ func splitCommand(text string) (name, args string) {
 	if text == "" {
 		return "", ""
 	}
-	if i := strings.IndexAny(text, " \t"); i >= 0 {
-		return text[:i], strings.TrimSpace(text[i+1:])
+	if i := strings.IndexFunc(text, unicode.IsSpace); i >= 0 {
+		return text[:i], strings.TrimSpace(text[i:])
 	}
 	return text, ""
 }
@@ -106,6 +110,7 @@ func init() {
 	registerCommand(&Command{
 		Name:        "new",
 		Description: "Start a new session; /new <agent> switches to another agent.",
+		Complete:    completeAgentNames,
 		Handler: func(m *Model, args string) tea.Cmd {
 			target := strings.TrimSpace(args)
 
@@ -156,6 +161,7 @@ func init() {
 	registerCommand(&Command{
 		Name:        "resume",
 		Description: "Resume a session by id (any agent; see /sessions all).",
+		Complete:    completeSessionIDs,
 		Handler: func(m *Model, args string) tea.Cmd {
 			name := strings.TrimSpace(args)
 			if name == "" {
@@ -224,6 +230,7 @@ func init() {
 	registerCommand(&Command{
 		Name:        "sessions",
 		Description: "List saved sessions; /sessions all lists every agent's.",
+		Complete:    func(m *Model) []string { return []string{"all"} },
 		Handler: func(m *Model, args string) tea.Cmd {
 			if strings.TrimSpace(args) == "all" {
 				m.appendLine(m.renderAllSessions())
@@ -319,6 +326,7 @@ func init() {
 	registerCommand(&Command{
 		Name:        "skill",
 		Description: "Load an on-demand skill into the system prompt for the rest of the session.",
+		Complete:    completeAvailableSkills,
 		Handler: func(m *Model, args string) tea.Cmd {
 			if !m.requireAgent("skill") {
 				return nil
