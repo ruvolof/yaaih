@@ -139,6 +139,8 @@ type Model struct {
 	costLimitWarned bool
 
 	pendingApproval *agent.ApprovalRequest
+	approvalFields  []approvalField
+	approvalScroll  int
 }
 
 // toastExpiredMsg is delivered by a tea.Tick to clear an old toast. The
@@ -297,6 +299,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.relayout()
 
 	case tea.MouseMsg:
+		if m.pendingApproval != nil {
+			switch msg.Button {
+			case tea.MouseButtonWheelUp:
+				m.scrollApproval(-3)
+			case tea.MouseButtonWheelDown:
+				m.scrollApproval(3)
+			}
+			return m, nil
+		}
 		// Forward all mouse events to the chat viewport. It only acts on
 		// wheel events (MouseWheelEnabled defaults to true); clicks and
 		// drags are no-ops for us. Track auto-stick after each wheel so
@@ -329,6 +340,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// loop it's in and return control to the operator.
 				m.pendingApproval.Cancel()
 				m.pendingApproval = nil
+			case "up", "k":
+				m.scrollApproval(-1)
+			case "down", "j":
+				m.scrollApproval(1)
+			case "pgup":
+				m.scrollApproval(-m.approvalBodyHeight())
+			case "pgdown":
+				m.scrollApproval(m.approvalBodyHeight())
+			case "home", "g":
+				m.approvalScroll = 0
+			case "end", "G":
+				m.approvalScroll = m.approvalMaxScroll()
 			}
 			return m, nil
 		}
@@ -483,6 +506,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agent.ApprovalRequestMsg:
 		m.pendingApproval = msg.Request
+		m.approvalFields = parseApprovalArgs(msg.Request.Args)
+		m.approvalScroll = 0
 		cmds = append(cmds, waitForEvent(m.ag.Events()))
 
 	case agent.ErrorMsg:
@@ -954,18 +979,6 @@ func renderApprovalStanding(standing agent.ApprovalStanding) string {
 		fmt.Fprintln(&b, "asks every call")
 	}
 	return b.String()
-}
-
-func (m *Model) renderApproval() string {
-	request := m.pendingApproval
-	return fmt.Sprintf(
-		"%s\n\nTool: %s\n\nArgs:\n%s\n\n%s\n%s",
-		styleHeader.Render("Approval required"),
-		styleAccent(request.ToolName),
-		request.Args,
-		styleMuted.Render("[y] approve   [n] deny   [q/esc] cancel turn"),
-		styleMuted.Render(fmt.Sprintf("[a] always allow %s   [A] allow all tools   (this session)", request.ToolName)),
-	)
 }
 
 // contextWarnPercent is the fill level at which the context stops being
