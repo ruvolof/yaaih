@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
+	"github.com/ruvolof/yaaih/internal/llm"
 )
 
 func testHeader(id ID) Header {

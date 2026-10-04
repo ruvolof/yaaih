@@ -14,10 +14,10 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/history"
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
-	"github.com/ruvolof/aibitat-harness-go/internal/session"
-	"github.com/ruvolof/aibitat-harness-go/internal/toolout"
+	"github.com/ruvolof/yaaih/internal/history"
+	"github.com/ruvolof/yaaih/internal/llm"
+	"github.com/ruvolof/yaaih/internal/session"
+	"github.com/ruvolof/yaaih/internal/toolout"
 )
 
 // compactPrompt instructs the summarising call. It asks for notes the agent

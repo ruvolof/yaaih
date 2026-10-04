@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
+	"github.com/ruvolof/yaaih/internal/llm"
 )
 
 // blockingRunner holds the turn inside the tool call until its context is

@@ -1,4 +1,4 @@
-# aibitat-harness-go runtime image.
+# yaaih runtime image.
 #
 # This image is the sandbox where agent tools execute:
 #   - bash session (stateful, attached via `docker exec`)

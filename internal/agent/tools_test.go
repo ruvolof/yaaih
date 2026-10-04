@@ -5,9 +5,9 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/browser"
-	"github.com/ruvolof/aibitat-harness-go/internal/config"
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
+	"github.com/ruvolof/yaaih/internal/browser"
+	"github.com/ruvolof/yaaih/internal/config"
+	"github.com/ruvolof/yaaih/internal/llm"
 )
 
 // builtinCapabilities lists every built-in and the capability that unlocks it.

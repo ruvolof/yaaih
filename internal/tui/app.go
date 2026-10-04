@@ -16,12 +16,12 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/agent"
-	"github.com/ruvolof/aibitat-harness-go/internal/config"
-	"github.com/ruvolof/aibitat-harness-go/internal/executor"
-	"github.com/ruvolof/aibitat-harness-go/internal/governor"
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
-	"github.com/ruvolof/aibitat-harness-go/internal/logging"
+	"github.com/ruvolof/yaaih/internal/agent"
+	"github.com/ruvolof/yaaih/internal/config"
+	"github.com/ruvolof/yaaih/internal/executor"
+	"github.com/ruvolof/yaaih/internal/governor"
+	"github.com/ruvolof/yaaih/internal/llm"
+	"github.com/ruvolof/yaaih/internal/logging"
 )
 
 var log = logging.For("tui")
@@ -585,7 +585,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View renders the full screen.
 func (m *Model) View() string {
 	if m.width == 0 || m.height == 0 {
-		return "starting harness-go..."
+		return "starting yaaih..."
 	}
 
 	// Layout: chat (left, ~75%) | sidebar (right, ~25%), then input full width.

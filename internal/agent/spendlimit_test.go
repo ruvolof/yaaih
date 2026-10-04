@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/governor"
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
+	"github.com/ruvolof/yaaih/internal/governor"
+	"github.com/ruvolof/yaaih/internal/llm"
 )
 
 func (p *stubProvider) requestCount() int {

@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/config"
-	"github.com/ruvolof/aibitat-harness-go/internal/governor"
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
-	"github.com/ruvolof/aibitat-harness-go/internal/session"
-	"github.com/ruvolof/aibitat-harness-go/internal/skills"
+	"github.com/ruvolof/yaaih/internal/config"
+	"github.com/ruvolof/yaaih/internal/governor"
+	"github.com/ruvolof/yaaih/internal/llm"
+	"github.com/ruvolof/yaaih/internal/session"
+	"github.com/ruvolof/yaaih/internal/skills"
 )
 
 const networkSkillBody = "NETWORK SKILL: always pass -m 5 to curl."

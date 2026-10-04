@@ -7,9 +7,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/agent"
-	"github.com/ruvolof/aibitat-harness-go/internal/config"
-	"github.com/ruvolof/aibitat-harness-go/internal/session"
+	"github.com/ruvolof/yaaih/internal/agent"
+	"github.com/ruvolof/yaaih/internal/config"
+	"github.com/ruvolof/yaaih/internal/session"
 )
 
 // maxListedCompletions caps how many candidates one Tab prints, so a prefix

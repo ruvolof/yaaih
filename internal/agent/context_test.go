@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/config"
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
+	"github.com/ruvolof/yaaih/internal/config"
+	"github.com/ruvolof/yaaih/internal/llm"
 )
 
 // bulkOutput is a tool result big enough to matter to the budget. The lines

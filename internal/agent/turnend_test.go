@@ -6,10 +6,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/config"
-	"github.com/ruvolof/aibitat-harness-go/internal/governor"
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
-	"github.com/ruvolof/aibitat-harness-go/internal/session"
+	"github.com/ruvolof/yaaih/internal/config"
+	"github.com/ruvolof/yaaih/internal/governor"
+	"github.com/ruvolof/yaaih/internal/llm"
+	"github.com/ruvolof/yaaih/internal/session"
 )
 
 // newOverBudgetAgent has a system prompt that alone exceeds the context

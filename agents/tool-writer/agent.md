@@ -5,7 +5,7 @@ provider:
   base_url: "https://openrouter.ai/api/v1"
   api_key_env: "OPENROUTER_API_KEY"
 runtime:
-  image: "aibitat-harness-runtime:latest"
+  image: "yaaih-runtime:latest"
   workspace: "./workspace"  # bind-mounted read-write at /workspace (default shown)
 # All paths below show their defaults, resolved relative to this agent folder.
 # The tool-writing skill lives in ./skills; promoted tools live in ./tools

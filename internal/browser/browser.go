@@ -29,7 +29,7 @@ import (
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/mxschmitt/playwright-go"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/logging"
+	"github.com/ruvolof/yaaih/internal/logging"
 )
 
 var log = logging.For("browser")

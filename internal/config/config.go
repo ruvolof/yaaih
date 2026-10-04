@@ -18,8 +18,8 @@ import (
 	"github.com/yuin/goldmark/text"
 	"go.abhg.dev/goldmark/frontmatter"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/logging"
-	"github.com/ruvolof/aibitat-harness-go/internal/skills"
+	"github.com/ruvolof/yaaih/internal/logging"
+	"github.com/ruvolof/yaaih/internal/skills"
 )
 
 var log = logging.For("config")
@@ -171,7 +171,7 @@ type Options struct {
 
 // Defaults applied after parsing if the agent.md leaves fields blank.
 const (
-	defaultRuntimeImage  = "aibitat-harness-runtime:latest"
+	defaultRuntimeImage  = "yaaih-runtime:latest"
 	defaultWorkspace     = "./workspace"
 	defaultSkillsDir     = "skills"
 	defaultToolsDir      = "tools"

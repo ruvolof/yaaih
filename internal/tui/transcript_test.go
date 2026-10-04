@@ -8,8 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/agent"
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
+	"github.com/ruvolof/yaaih/internal/agent"
+	"github.com/ruvolof/yaaih/internal/llm"
 )
 
 // sizedTestModel is a Model laid out on a 120×40 screen, so clicks and

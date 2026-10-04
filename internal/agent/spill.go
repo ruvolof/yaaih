@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/executor"
+	"github.com/ruvolof/yaaih/internal/executor"
 )
 
 // spillDirName is where full tool outputs are written, relative to the

@@ -24,10 +24,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/agent"
-	"github.com/ruvolof/aibitat-harness-go/internal/executor"
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
-	"github.com/ruvolof/aibitat-harness-go/internal/logging"
+	"github.com/ruvolof/yaaih/internal/agent"
+	"github.com/ruvolof/yaaih/internal/executor"
+	"github.com/ruvolof/yaaih/internal/llm"
+	"github.com/ruvolof/yaaih/internal/logging"
 )
 
 var log = logging.For("scripttools")

@@ -10,7 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/agent"
+	"github.com/ruvolof/yaaih/internal/agent"
 )
 
 func TestApprovalArgsShowCommandsAsTheyRun(t *testing.T) {

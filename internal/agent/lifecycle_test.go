@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/governor"
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
-	"github.com/ruvolof/aibitat-harness-go/internal/session"
+	"github.com/ruvolof/yaaih/internal/governor"
+	"github.com/ruvolof/yaaih/internal/llm"
+	"github.com/ruvolof/yaaih/internal/session"
 )
 
 func contentsOf(msgs []llm.Message) string {

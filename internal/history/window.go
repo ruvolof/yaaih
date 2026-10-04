@@ -20,8 +20,8 @@ package history
 import (
 	"fmt"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
-	"github.com/ruvolof/aibitat-harness-go/internal/toolout"
+	"github.com/ruvolof/yaaih/internal/llm"
+	"github.com/ruvolof/yaaih/internal/toolout"
 )
 
 // Budget is the token ceiling for one request. Windowing starts when a prompt

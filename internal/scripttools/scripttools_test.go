@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/agent"
-	"github.com/ruvolof/aibitat-harness-go/internal/config"
+	"github.com/ruvolof/yaaih/internal/agent"
+	"github.com/ruvolof/yaaih/internal/config"
 )
 
 // stubRunner records the last command and returns canned output, standing in

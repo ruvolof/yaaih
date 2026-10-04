@@ -1,6 +1,6 @@
-# aibitat-harness-go
+# yaaih
 
-`aibitat-harness-go` is a stateful agent runtime with a TUI front end. It runs an agent defined in the `./agents/chatter` folder by default, connects to an OpenAI-compatible LLM endpoint, and executes sandboxed shell/browser/filesystem tools inside a Docker runtime container.
+`yaaih` is a stateful agent runtime with a TUI front end. It runs an agent defined in the `./agents/chatter` folder by default, connects to an OpenAI-compatible LLM endpoint, and executes sandboxed shell/browser/filesystem tools inside a Docker runtime container.
 
 Each agent lives in its own folder under `agents/` — e.g. `agents/devops/` — containing `agent.md` (the definition), plus `skills/`, `tools/`, and a runtime `workspace/`. Point `--agent` at the folder; the harness reads `agent.md` inside it.
 
@@ -41,7 +41,7 @@ mkdir -p "$GOMODCACHE" "$GOCACHE" "$GOBIN"
 
 go mod tidy
 go mod vendor
-go build -mod=vendor -o aibitat-harness-go .
+go build -mod=vendor -o yaaih .
 ```
 
 ### Tests and coverage
@@ -135,7 +135,7 @@ This builds the binary and runs it with the `./agents/chatter` agent folder as t
 ### Run an alternate agent
 
 ```bash
-./aibitat-harness-go --agent ./agents/devops
+./yaaih --agent ./agents/devops
 ```
 
 `--agent` takes the agent folder (the harness reads `agent.md` inside it). You can override its directories per launch with `--workspace`, `--skills-dir`, `--tools-dir`, and `--sessions-dir`.
@@ -145,7 +145,7 @@ This builds the binary and runs it with the `./agents/chatter` agent folder as t
 Point `--agents` at a folder of agent folders to start in multi-agent mode:
 
 ```bash
-./aibitat-harness-go --agents ./agents
+./yaaih --agents ./agents
 ```
 
 This starts with **no agent selected** and shows the available agents. From the TUI:
@@ -216,7 +216,7 @@ provider:
   base_url: "<openai-compatible-base-url>"
   api_key_env: "<ENV_VAR_NAME>"
 runtime:
-  image: "aibitat-harness-runtime:latest"
+  image: "yaaih-runtime:latest"
   workspace: "./workspace"
 ```
 
@@ -250,7 +250,7 @@ provider:
   max_session_cost_usd: 2.00
   max_session_tokens: 2000000
 runtime:
-  image: "aibitat-harness-runtime:latest"
+  image: "yaaih-runtime:latest"
   workspace: "./workspace"
   limits:
     memory: "2g"
@@ -608,7 +608,7 @@ grep 'level=ERROR' logs/harness-*.log
 Pass `--log-level` to set the level (default `info`):
 
 ```bash
-./aibitat-harness-go --log-level debug
+./yaaih --log-level debug
 ```
 
 Recognised values: `debug`, `info`, `warn`, `error`. Debug adds finer-grained

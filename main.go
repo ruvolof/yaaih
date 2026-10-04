@@ -1,4 +1,4 @@
-// aibitat-harness-go: a high-performance stateful agent runtime with a TUI front-end.
+// yaaih: a high-performance stateful agent runtime with a TUI front-end.
 // The host process owns the TUI and the LLM client; every tool that touches
 // the world (shell, browser, filesystem) executes inside a sandboxed Docker
 // container managed for the lifetime of the session.
@@ -18,18 +18,18 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/agent"
-	"github.com/ruvolof/aibitat-harness-go/internal/browser"
-	"github.com/ruvolof/aibitat-harness-go/internal/config"
-	"github.com/ruvolof/aibitat-harness-go/internal/docker"
-	"github.com/ruvolof/aibitat-harness-go/internal/dotenv"
-	"github.com/ruvolof/aibitat-harness-go/internal/executor"
-	"github.com/ruvolof/aibitat-harness-go/internal/governor"
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
-	"github.com/ruvolof/aibitat-harness-go/internal/logging"
-	"github.com/ruvolof/aibitat-harness-go/internal/scripttools"
-	"github.com/ruvolof/aibitat-harness-go/internal/session"
-	"github.com/ruvolof/aibitat-harness-go/internal/tui"
+	"github.com/ruvolof/yaaih/internal/agent"
+	"github.com/ruvolof/yaaih/internal/browser"
+	"github.com/ruvolof/yaaih/internal/config"
+	"github.com/ruvolof/yaaih/internal/docker"
+	"github.com/ruvolof/yaaih/internal/dotenv"
+	"github.com/ruvolof/yaaih/internal/executor"
+	"github.com/ruvolof/yaaih/internal/governor"
+	"github.com/ruvolof/yaaih/internal/llm"
+	"github.com/ruvolof/yaaih/internal/logging"
+	"github.com/ruvolof/yaaih/internal/scripttools"
+	"github.com/ruvolof/yaaih/internal/session"
+	"github.com/ruvolof/yaaih/internal/tui"
 )
 
 func main() {

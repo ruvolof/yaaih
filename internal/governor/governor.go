@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
-	"github.com/ruvolof/aibitat-harness-go/internal/logging"
+	"github.com/ruvolof/yaaih/internal/llm"
+	"github.com/ruvolof/yaaih/internal/logging"
 )
 
 var log = logging.For("governor")

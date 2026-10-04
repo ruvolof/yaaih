@@ -17,15 +17,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/browser"
-	"github.com/ruvolof/aibitat-harness-go/internal/config"
-	"github.com/ruvolof/aibitat-harness-go/internal/executor"
-	"github.com/ruvolof/aibitat-harness-go/internal/governor"
-	"github.com/ruvolof/aibitat-harness-go/internal/history"
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
-	"github.com/ruvolof/aibitat-harness-go/internal/logging"
-	"github.com/ruvolof/aibitat-harness-go/internal/session"
-	"github.com/ruvolof/aibitat-harness-go/internal/toolout"
+	"github.com/ruvolof/yaaih/internal/browser"
+	"github.com/ruvolof/yaaih/internal/config"
+	"github.com/ruvolof/yaaih/internal/executor"
+	"github.com/ruvolof/yaaih/internal/governor"
+	"github.com/ruvolof/yaaih/internal/history"
+	"github.com/ruvolof/yaaih/internal/llm"
+	"github.com/ruvolof/yaaih/internal/logging"
+	"github.com/ruvolof/yaaih/internal/session"
+	"github.com/ruvolof/yaaih/internal/toolout"
 )
 
 var log = logging.For("agent")

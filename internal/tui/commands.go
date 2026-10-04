@@ -20,10 +20,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/agent"
-	"github.com/ruvolof/aibitat-harness-go/internal/config"
-	"github.com/ruvolof/aibitat-harness-go/internal/scripttools"
-	"github.com/ruvolof/aibitat-harness-go/internal/session"
+	"github.com/ruvolof/yaaih/internal/agent"
+	"github.com/ruvolof/yaaih/internal/config"
+	"github.com/ruvolof/yaaih/internal/scripttools"
+	"github.com/ruvolof/yaaih/internal/session"
 )
 
 // Command is a built-in slash command. Handler runs synchronously on the

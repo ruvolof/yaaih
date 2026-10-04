@@ -9,7 +9,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/logging"
+	"github.com/ruvolof/yaaih/internal/logging"
 )
 
 // dockerBash attaches a bash process inside the sandbox container over the

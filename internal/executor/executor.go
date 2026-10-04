@@ -38,8 +38,8 @@ import (
 
 	"github.com/docker/docker/client"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/logging"
-	"github.com/ruvolof/aibitat-harness-go/internal/toolout"
+	"github.com/ruvolof/yaaih/internal/logging"
+	"github.com/ruvolof/yaaih/internal/toolout"
 )
 
 var log = logging.For("executor")

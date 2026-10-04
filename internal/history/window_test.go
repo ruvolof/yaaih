@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
+	"github.com/ruvolof/yaaih/internal/llm"
 )
 
 func systemMessage(content string) llm.Message {

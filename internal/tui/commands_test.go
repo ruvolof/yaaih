@@ -4,12 +4,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/agent"
-	"github.com/ruvolof/aibitat-harness-go/internal/config"
-	"github.com/ruvolof/aibitat-harness-go/internal/governor"
-	"github.com/ruvolof/aibitat-harness-go/internal/scripttools"
-	"github.com/ruvolof/aibitat-harness-go/internal/session"
-	"github.com/ruvolof/aibitat-harness-go/internal/skills"
+	"github.com/ruvolof/yaaih/internal/agent"
+	"github.com/ruvolof/yaaih/internal/config"
+	"github.com/ruvolof/yaaih/internal/governor"
+	"github.com/ruvolof/yaaih/internal/scripttools"
+	"github.com/ruvolof/yaaih/internal/session"
+	"github.com/ruvolof/yaaih/internal/skills"
 )
 
 func TestLookupCommand(t *testing.T) {

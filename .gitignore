@@ -1,6 +1,6 @@
 # Build artifacts
-/aibitat-harness-go
-/aibitat-harness-go.exe
+/yaaih
+/yaaih.exe
 /vendor/
 
 # Project-local Go caches (set via Makefile / build.ps1)

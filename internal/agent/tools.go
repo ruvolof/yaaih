@@ -10,11 +10,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/browser"
-	"github.com/ruvolof/aibitat-harness-go/internal/config"
-	"github.com/ruvolof/aibitat-harness-go/internal/executor"
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
-	"github.com/ruvolof/aibitat-harness-go/internal/toolout"
+	"github.com/ruvolof/yaaih/internal/browser"
+	"github.com/ruvolof/yaaih/internal/config"
+	"github.com/ruvolof/yaaih/internal/executor"
+	"github.com/ruvolof/yaaih/internal/llm"
+	"github.com/ruvolof/yaaih/internal/toolout"
 )
 
 // ToolFunc is the runtime implementation of a tool. It receives the raw JSON

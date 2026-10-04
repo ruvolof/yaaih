@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMAGE="aibitat-harness-runtime:latest"
+IMAGE="yaaih-runtime:latest"
 export GOPATH="$root/.go"
 export GOMODCACHE="$GOPATH/pkg/mod"
 export GOCACHE="$GOPATH/cache"
@@ -67,7 +67,7 @@ case "$target" in
       go mod tidy
       go mod vendor
     fi
-    go build -mod=vendor -o "$root/aibitat-harness-go" .
+    go build -mod=vendor -o "$root/yaaih" .
     ;;
   image)
     docker build -t "$IMAGE" -f "$root/Dockerfile" "$root"
@@ -122,11 +122,11 @@ case "$target" in
     if [ -n "${DOCKER_HOST:-}" ]; then
       echo "Using Docker host: $DOCKER_HOST"
     fi
-    go build -mod=vendor -o "$root/aibitat-harness-go" .
-    "$root/aibitat-harness-go" --agent "$root/agents/chatter"
+    go build -mod=vendor -o "$root/yaaih" .
+    "$root/yaaih" --agent "$root/agents/chatter"
     ;;
   clean)
-    rm -rf "$root/vendor" "$root/.go" "$root/aibitat-harness-go"
+    rm -rf "$root/vendor" "$root/.go" "$root/yaaih"
     ;;
   *)
     usage

@@ -10,7 +10,7 @@ package history
 import (
 	"encoding/json"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
+	"github.com/ruvolof/yaaih/internal/llm"
 )
 
 // Byte-per-token ratios differ by an order of magnitude less than the budgets

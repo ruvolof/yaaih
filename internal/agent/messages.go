@@ -4,7 +4,7 @@
 package agent
 
 import (
-	"github.com/ruvolof/aibitat-harness-go/internal/governor"
+	"github.com/ruvolof/yaaih/internal/governor"
 )
 
 // AssistantDeltaMsg is one streamed content chunk from the model.

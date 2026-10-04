@@ -1,4 +1,4 @@
-# Windows build helper for aibitat-harness-go.
+# Windows build helper for yaaih.
 #
 # Points every Go cache at .go/ inside the project so the developer's global
 # Go installation is left untouched. Usage:
@@ -27,7 +27,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$image = 'aibitat-harness-runtime:latest'
+$image = 'yaaih-runtime:latest'
 
 $env:GOPATH     = Join-Path $root '.go'
 $env:GOMODCACHE = Join-Path $root '.go/pkg/mod'
@@ -65,7 +65,7 @@ switch ($Target) {
             & $go mod tidy
             & $go mod vendor
         }
-        & $go build -mod=vendor -o aibitat-harness-go.exe .
+        & $go build -mod=vendor -o yaaih.exe .
     }
     'image'  { Build-RuntimeImage }
     'test'   {
@@ -138,13 +138,13 @@ switch ($Target) {
             Write-Host "Building runtime image $image from $(Join-Path $root 'Dockerfile')..."
             Build-RuntimeImage
         }
-        & $go build -mod=vendor -o aibitat-harness-go.exe .
-        & (Join-Path $root 'aibitat-harness-go.exe') --agent (Join-Path $root 'agents/chatter')
+        & $go build -mod=vendor -o yaaih.exe .
+        & (Join-Path $root 'yaaih.exe') --agent (Join-Path $root 'agents/chatter')
     }
     'clean'  {
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue `
             (Join-Path $root 'vendor'),
             (Join-Path $root '.go'),
-            (Join-Path $root 'aibitat-harness-go.exe')
+            (Join-Path $root 'yaaih.exe')
     }
 }

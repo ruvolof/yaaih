@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
+	"github.com/ruvolof/yaaih/internal/llm"
 )
 
 func TestEstimateGrowsWithTheConversation(t *testing.T) {

@@ -38,7 +38,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/logging"
+	"github.com/ruvolof/yaaih/internal/logging"
 )
 
 var log = logging.For("docker")
@@ -53,9 +53,9 @@ const CDPPort = "9222"
 // harness process that started it, so the orphan sweep can tell a crashed
 // harness's leftover from a sandbox another harness is still using.
 const (
-	sessionLabel   = "aibitat-harness-go.session"
-	ownerHostLabel = "aibitat-harness-go.owner-host"
-	ownerPIDLabel  = "aibitat-harness-go.owner-pid"
+	sessionLabel   = "yaaih.session"
+	ownerHostLabel = "yaaih.owner-host"
+	ownerPIDLabel  = "yaaih.owner-pid"
 )
 
 // owner identifies a harness process: a pid is only meaningful on the host
@@ -116,7 +116,7 @@ type Limits struct {
 
 // Options configures a session container.
 type Options struct {
-	// Image is the Docker image tag to use, e.g. "harness-go-runtime:latest".
+	// Image is the Docker image tag to use, e.g. "yaaih-runtime:latest".
 	// The image must already exist locally; build it with the project's build
 	// script (`./build.sh image` or `.\build.ps1 image`).
 	Image string

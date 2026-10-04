@@ -7,8 +7,8 @@
 package agent
 
 import (
-	"github.com/ruvolof/aibitat-harness-go/internal/history"
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
+	"github.com/ruvolof/yaaih/internal/history"
+	"github.com/ruvolof/yaaih/internal/llm"
 )
 
 // requestMessages returns the conversation to send for one iteration: the whole

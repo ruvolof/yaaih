@@ -1,4 +1,4 @@
-module github.com/ruvolof/aibitat-harness-go
+module github.com/ruvolof/yaaih
 
 go 1.26
 

@@ -15,8 +15,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/llm"
-	"github.com/ruvolof/aibitat-harness-go/internal/skills"
+	"github.com/ruvolof/yaaih/internal/llm"
+	"github.com/ruvolof/yaaih/internal/skills"
 )
 
 // SkillState is where a skill stands in the current session.

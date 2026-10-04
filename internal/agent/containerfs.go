@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ruvolof/aibitat-harness-go/internal/executor"
+	"github.com/ruvolof/yaaih/internal/executor"
 )
 
 // containerFSMarker opens the status line a filesystem command prints after

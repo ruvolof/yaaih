@@ -1,12 +1,12 @@
-# aibitat-harness-go build targets.
+# yaaih build targets.
 # Runtime sandbox is a Docker container; the host machine is only used to
 # build the harness binary.
 #
 # All Go state (module cache, build cache, GOPATH bin) is kept under .go/
 # in this directory so nothing leaks into the developer's global Go install.
 
-BINARY        := aibitat-harness-go
-IMAGE         := aibitat-harness-runtime:latest
+BINARY        := yaaih
+IMAGE         := yaaih-runtime:latest
 DOCKERFILE    := Dockerfile
 
 # Project-local Go caches.
