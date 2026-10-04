@@ -230,7 +230,6 @@ runtime:
 - `runtime.run_as_host_user`: run the sandbox as your own user instead of root (default `false`)
 - `capabilities`: list of enabled capabilities like `shell`, `browser`, `filesystem`
 - `safety.approval_required`: `true` or `false`
-- `options.supports_vision`: `true` or `false`
 - `options.max_tool_iterations`: integer
 - `options.command_timeout`: seconds
 - `options.max_tool_result_bytes`: bytes of tool output kept in the conversation (default 32768)
@@ -264,7 +263,6 @@ capabilities:
 safety:
   approval_required: true
 options:
-  supports_vision: false
   max_tool_iterations: 25
   command_timeout: 120
   max_tool_result_bytes: 32768
@@ -339,7 +337,6 @@ From `internal/config/config.go`:
 - `runtime.run_as_host_user` (bool)
 - `capabilities` (array of strings)
 - `safety.approval_required` (bool)
-- `options.supports_vision` (bool)
 - `options.max_tool_iterations` (int)
 - `options.command_timeout` (int)
 - `options.max_tool_result_bytes` (int)

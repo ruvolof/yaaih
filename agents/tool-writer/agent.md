@@ -25,7 +25,6 @@ capabilities:
 safety:
   approval_required: true
 options:
-  supports_vision: false
   max_tool_iterations: 25
   command_timeout: 120
   max_context_tokens: 950000

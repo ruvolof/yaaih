@@ -293,18 +293,18 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 		Capability: "browser",
 		Def: llm.ToolDefinition{
 			Name:        "browser_screenshot",
-			Description: "Capture a PNG screenshot of the current page. When the model lacks vision support, the result is a Markdown text summary; otherwise it is the absolute path to the saved image.",
+			Description: "Capture a PNG screenshot of the current page. The result is the path to the saved image followed by a Markdown text summary of the page.",
 			Parameters:  emptyObjectSchema(),
 		},
 		Fn: func(ctx context.Context, args string) (string, error) {
-			path, fallback, err := br.Screenshot(ctx)
+			path, pageText, err := br.Screenshot(ctx)
 			if err != nil {
 				return "", err
 			}
-			if fallback != "" {
-				return fmt.Sprintf("Saved screenshot to %s. Text fallback (vision unsupported):\n\n%s", path, fallback), nil
+			if pageText == "" {
+				return fmt.Sprintf("Saved screenshot to %s.", path), nil
 			}
-			return path, nil
+			return fmt.Sprintf("Saved screenshot to %s. Page text:\n\n%s", path, pageText), nil
 		},
 	})
 

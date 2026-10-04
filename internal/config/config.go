@@ -138,9 +138,8 @@ type Safety struct {
 
 // Options is the bag of behavioural knobs for the agent loop.
 type Options struct {
-	SupportsVision    bool `yaml:"supports_vision"`
-	MaxToolIterations int  `yaml:"max_tool_iterations"`
-	CommandTimeout    int  `yaml:"command_timeout"` // seconds
+	MaxToolIterations int `yaml:"max_tool_iterations"`
+	CommandTimeout    int `yaml:"command_timeout"` // seconds
 
 	// MaxToolResultBytes bounds how much of a tool's output is kept in the
 	// conversation. History is re-sent on every subsequent request, so this is

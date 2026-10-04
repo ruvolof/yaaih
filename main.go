@@ -367,7 +367,6 @@ func setupRuntime(ctx context.Context, cfg *config.Config) (executor.Executor, *
 		DockerClient:   rt.Client(),
 		ContainerID:    rt.ContainerID(),
 		ScreenshotsDir: screenshotsDir,
-		SupportsVision: cfg.Options.SupportsVision,
 		UserAgent:      cfg.Options.BrowserUserAgent,
 		Timeout:        time.Duration(cfg.Options.BrowserTimeout) * time.Second,
 	})

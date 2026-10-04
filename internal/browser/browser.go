@@ -10,10 +10,6 @@
 //     driver on the host if needed, and connects over CDP.
 //  3. Subsequent operations reuse the connection.
 //  4. Close() detaches playwright and tears down the in-container processes.
-//
-// Vision support is honoured at the tool layer: when the model lacks vision,
-// screenshot calls return a Markdown text summary of the page in place of an
-// image path.
 package browser
 
 import (
@@ -50,9 +46,6 @@ type Options struct {
 	// be writable and ideally on the workspace bind-mount so paths are
 	// addressable from inside the container too.
 	ScreenshotsDir string
-	// SupportsVision flips Screenshot from "return image path" to "also return
-	// a text fallback the model can consume".
-	SupportsVision bool
 	// UserAgent overrides the User-Agent Chromium advertises. Empty derives one
 	// from the version of the Chromium in the container.
 	UserAgent string
@@ -302,7 +295,6 @@ func (b *Browser) init(ctx context.Context) error {
 	}
 	log.Info("connected via CDP",
 		"endpoint", b.opts.CDPEndpoint,
-		"vision", b.opts.SupportsVision,
 		"screenshots_dir", b.opts.ScreenshotsDir,
 	)
 	return nil
@@ -550,9 +542,10 @@ const contentScript = `() => {
 }`
 
 // Screenshot saves a PNG of the current page to ScreenshotsDir and returns the
-// absolute host path. When SupportsVision is false, the second return value is
-// a text fallback the agent loop should pass to the model instead.
-func (b *Browser) Screenshot(ctx context.Context) (path string, textFallback string, err error) {
+// absolute host path together with a Markdown text summary of the page, which
+// is what the model reads: messages carry text only, so the image itself never
+// reaches it. The summary is empty if extracting it failed.
+func (b *Browser) Screenshot(ctx context.Context) (path string, pageText string, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := b.init(ctx); err != nil {
@@ -567,14 +560,10 @@ func (b *Browser) Screenshot(ctx context.Context) (path string, textFallback str
 		log.Error("screenshot failed", "err", err)
 		return "", "", err
 	}
-	log.Info("screenshot saved", "path", full, "vision", b.opts.SupportsVision)
-	if b.opts.SupportsVision {
-		return full, "", nil
-	}
-	// Text fallback when the model can't process images.
+	log.Info("screenshot saved", "path", full)
 	text, err := b.content()
 	if err != nil {
-		log.Warn("screenshot text fallback failed", "err", err)
+		log.Warn("screenshot page text failed", "err", err)
 	}
 	return full, text, nil
 }
