@@ -78,6 +78,9 @@ type Model struct {
 	renderPending bool
 	renderTicking bool
 
+	// replyRenderTicking is true while a replyRenderTickMsg is scheduled.
+	replyRenderTicking bool
+
 	// userScrolled tracks whether the user has manually scrolled the chat
 	// viewport away from the bottom. When true, new content (streaming
 	// deltas, tool results, etc.) is appended without snapping the view
@@ -154,6 +157,21 @@ type renderTickMsg struct{}
 
 func renderTick() tea.Cmd {
 	return tea.Tick(renderTickInterval, func(time.Time) tea.Msg { return renderTickMsg{} })
+}
+
+// A resize draws the replies on screen as Markdown straight away and leaves
+// the rest as stand-ins; replyRenderTickMsg draws those in batches of about
+// replyRenderBudget, one every replyRenderInterval, so a long session stays
+// responsive to keys and further resizes while it catches up.
+const (
+	replyRenderInterval = 16 * time.Millisecond
+	replyRenderBudget   = 8 * time.Millisecond
+)
+
+type replyRenderTickMsg struct{}
+
+func replyRenderTick() tea.Cmd {
+	return tea.Tick(replyRenderInterval, func(time.Time) tea.Msg { return replyRenderTickMsg{} })
 }
 
 // New constructs the TUI model. Pass the cancellable context the program is
@@ -239,7 +257,7 @@ func (m *Model) prefillFromHistory(history []llm.Message) {
 			m.appendLine(styleUser.Render("You: ") + msg.Content)
 		case llm.RoleAssistant:
 			if strings.TrimSpace(msg.Content) != "" {
-				m.appendLine(styleAssist.Render(msg.Content))
+				m.appendReply(msg.Content)
 				m.lastAssistant = msg.Content
 			}
 			for _, tc := range msg.ToolCalls {
@@ -287,6 +305,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.relayout()
+		cmds = append(cmds, m.scheduleReplyRendering())
 
 	case tea.MouseMsg:
 		if m.pendingApproval != nil {
@@ -574,6 +593,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.renderPending = false
 			m.renderChat()
 		}
+
+	case replyRenderTickMsg:
+		m.replyRenderTicking = false
+		reading, offset := m.readingPosition()
+		m.transcript.renderStaleNear(m.viewTop(reading, offset)+m.chat.Height/2, replyRenderBudget)
+		m.renderChatKeeping(reading, offset)
+		cmds = append(cmds, m.scheduleReplyRendering())
 
 	case agentClosedMsg:
 		return m, tea.Quit
@@ -871,23 +897,23 @@ func (m *Model) showAgentPicker() {
 }
 
 // commitAssistant moves the reply streamed so far out of the pending buffer and
-// into the transcript. Until it runs, renderChat draws that text below every
-// committed line, so a reply left pending across a tool call would sit under
-// the tool traffic it introduced and slide further down with each one.
+// into the transcript, where it is drawn as Markdown. Until it runs, renderChat
+// draws that text raw below every committed line, so a reply left pending
+// across a tool call would sit under the tool traffic it introduced and slide
+// further down with each one.
 func (m *Model) commitAssistant() {
 	if m.pendingAs.Len() == 0 {
 		return
 	}
-	// Render and clear pendingAs BEFORE appendLine — appendLine calls
-	// renderChat synchronously, and renderChat draws pendingAs below the
-	// transcript. Without the reset-first, the reply shows twice until the next
-	// event triggers another render.
+	// Clear pendingAs BEFORE appendReply — appendReply calls renderChat
+	// synchronously, and renderChat draws pendingAs below the transcript.
+	// Without the reset-first, the reply shows twice until the next event
+	// triggers another render.
 	plain := m.pendingAs.String()
-	rendered := styleAssist.Render(plain)
 	m.pendingAs.Reset()
 	m.lastAssistant = plain
-	m.appendLine(rendered)
-	// appendLine already flushed. Clear the coalescing flag so any
+	m.appendReply(plain)
+	// appendReply already flushed. Clear the coalescing flag so any
 	// still-scheduled renderTickMsg becomes a no-op instead of doing a second
 	// identical repaint.
 	m.renderPending = false
@@ -895,6 +921,11 @@ func (m *Model) commitAssistant() {
 
 func (m *Model) appendLine(s string) {
 	m.transcript.appendText(s)
+	m.renderChat()
+}
+
+func (m *Model) appendReply(markdown string) {
+	m.transcript.appendReply(markdown)
 	m.renderChat()
 }
 
@@ -983,12 +1014,21 @@ func (m *Model) toolAt(x, y int) *chatEntry {
 }
 
 func (m *Model) renderChat() {
+	m.renderChatKeeping(m.readingPosition())
+}
+
+// renderChatKeeping re-renders with reading, offset lines in, kept at the top
+// of the view if the operator has scrolled away from the bottom — so a resize,
+// or replies above the view being drawn again, does not move what they are
+// reading.
+func (m *Model) renderChatKeeping(reading *chatEntry, offset int) {
 	width := m.chat.Width
 	if width <= 0 {
 		// Not sized yet; the first WindowSizeMsg lays the transcript out.
 		return
 	}
 	m.transcript.setWidth(width)
+	m.renderRepliesInView(reading, offset)
 	// Pre-wrap the body before handing it to SetContent. Without this the
 	// viewport's View() picks the last Height LOGICAL lines and lipgloss
 	// then re-wraps them — if any wrap to multiple visual lines, lipgloss's
@@ -1005,9 +1045,57 @@ func (m *Model) renderChat() {
 		}
 	}
 	m.chat.SetContent(body)
-	if !m.userScrolled {
+	switch {
+	case !m.userScrolled:
 		m.chat.GotoBottom()
+	case reading != nil:
+		m.chat.SetYOffset(m.viewTop(reading, offset))
 	}
+}
+
+// readingPosition is the entry at the top of the view and how many of its
+// lines are scrolled past, or nil while the view follows the bottom.
+func (m *Model) readingPosition() (*chatEntry, int) {
+	if !m.userScrolled {
+		return nil, 0
+	}
+	entry := m.transcript.entryAtLine(m.chat.YOffset)
+	if entry == nil {
+		return nil, 0
+	}
+	return entry, m.chat.YOffset - entry.firstLine
+}
+
+// viewTop is the transcript line the view starts at, by the current layout.
+func (m *Model) viewTop(reading *chatEntry, offset int) int {
+	switch {
+	case !m.userScrolled:
+		return max(m.transcript.lineCount-m.chat.Height, 0)
+	case reading != nil:
+		return reading.firstLine + min(offset, reading.lineCount-1)
+	default:
+		return m.chat.YOffset
+	}
+}
+
+// renderRepliesInView draws the stand-ins in view as Markdown, so the screen
+// never shows one. Drawing a reply changes its height and so what is in view;
+// each pass draws at least one, so the loop ends.
+func (m *Model) renderRepliesInView(reading *chatEntry, offset int) {
+	for {
+		top := m.viewTop(reading, offset)
+		if !m.transcript.renderReplies(top, top+m.chat.Height) {
+			return
+		}
+	}
+}
+
+func (m *Model) scheduleReplyRendering() tea.Cmd {
+	if m.replyRenderTicking || !m.transcript.hasStandIns() {
+		return nil
+	}
+	m.replyRenderTicking = true
+	return replyRenderTick()
 }
 
 func (m *Model) renderSidebar() string {

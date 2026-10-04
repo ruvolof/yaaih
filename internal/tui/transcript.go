@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 )
@@ -18,6 +19,11 @@ const unwrappedWidth = 1 << 20
 //
 // Appending an entry is the streaming hot path and only lays out that entry;
 // changing one re-lays it out and re-joins the cached text of all of them.
+//
+// Replies are the exception to laying everything out on a width change:
+// rendering Markdown costs far more than wrapping text, so a reply keeps its
+// last rendering re-wrapped as a stand-in until renderReplies or
+// renderStaleNear draws it at the new width.
 type transcript struct {
 	entries []*chatEntry
 
@@ -31,14 +37,23 @@ type transcript struct {
 
 	// selected is the tool call alt+↑/↓ has moved to, or nil.
 	selected *chatEntry
+
+	markdown markdownRenderer
 }
 
-// chatEntry is one block of the transcript: either fixed styled text or a tool
-// call, which the operator can expand to see in full.
+// chatEntry is one block of the transcript: fixed styled text, a completed
+// assistant reply kept as the Markdown it arrived in, or a tool call, which the
+// operator can expand to see in full.
 type chatEntry struct {
 	text     string
+	reply    string
 	tool     *toolCall
 	expanded bool
+
+	// rendered is the reply as glamour drew it at renderedWidth, which is 0
+	// until it has been drawn at all.
+	rendered      string
+	renderedWidth int
 
 	index     int
 	layout    string
@@ -61,6 +76,10 @@ func (t *transcript) appendText(text string) *chatEntry {
 	return t.appendEntry(&chatEntry{text: text})
 }
 
+func (t *transcript) appendReply(markdown string) *chatEntry {
+	return t.appendEntry(&chatEntry{reply: markdown})
+}
+
 func (t *transcript) appendTool(call *toolCall) *chatEntry {
 	return t.appendEntry(&chatEntry{tool: call})
 }
@@ -69,6 +88,9 @@ func (t *transcript) appendEntry(entry *chatEntry) *chatEntry {
 	entry.index = len(t.entries)
 	t.entries = append(t.entries, entry)
 	if t.width > 0 {
+		if entry.reply != "" {
+			t.renderReply(entry)
+		}
 		entry.layout = t.layOut(entry, t.width)
 		entry.firstLine = t.lineCount
 		entry.lineCount = strings.Count(entry.layout, "\n") + 1
@@ -132,11 +154,95 @@ func (t *transcript) layOut(entry *chatEntry, width int) string {
 	if entry.tool != nil {
 		return entry.tool.layOut(width, entry.expanded, entry == t.selected)
 	}
+	if entry.reply != "" {
+		return entry.replyLayout(width)
+	}
 	return ansi.Wrap(entry.text, width, "")
 }
 
-// plainText is the whole transcript without styling or wrapping, tool calls
-// in full.
+// replyLayout is the reply as glamour drew it at width or, until it has been,
+// a stand-in: its last rendering re-wrapped to fit, which is close enough in
+// shape that little moves when the real one replaces it.
+func (entry *chatEntry) replyLayout(width int) string {
+	switch entry.renderedWidth {
+	case width:
+		return entry.rendered
+	case 0:
+		return plainReply(entry.reply, width)
+	default:
+		return ansi.Wrap(entry.rendered, width, "")
+	}
+}
+
+func (t *transcript) renderReply(entry *chatEntry) {
+	entry.rendered = t.markdown.render(entry.reply, t.width)
+	entry.renderedWidth = t.width
+	entry.layout = entry.rendered
+}
+
+func (t *transcript) showsStandIn(entry *chatEntry) bool {
+	return entry.reply != "" && entry.renderedWidth != t.width
+}
+
+func (t *transcript) hasStandIns() bool {
+	for _, entry := range t.entries {
+		if t.showsStandIn(entry) {
+			return true
+		}
+	}
+	return false
+}
+
+// renderReplies draws every stand-in on lines [first, last) at the current
+// width and reports whether there was one.
+func (t *transcript) renderReplies(first, last int) bool {
+	if t.width <= 0 {
+		return false
+	}
+	rendered := false
+	for _, entry := range t.entries {
+		onScreen := entry.firstLine < last && entry.firstLine+entry.lineCount > first
+		if onScreen && t.showsStandIn(entry) {
+			t.renderReply(entry)
+			rendered = true
+		}
+	}
+	if rendered {
+		t.rejoin()
+	}
+	return rendered
+}
+
+// renderStaleNear draws stand-ins at the current width, nearest to line
+// first, until budget is spent. It always draws at least one if any are left.
+func (t *transcript) renderStaleNear(line int, budget time.Duration) {
+	if t.width <= 0 || len(t.entries) == 0 {
+		return
+	}
+	center := len(t.entries) - 1
+	if entry := t.entryAtLine(line); entry != nil {
+		center = entry.index
+	}
+	deadline := time.Now().Add(budget)
+	rendered := false
+	for distance := 0; distance < len(t.entries); distance++ {
+		for _, index := range []int{center + distance, center - distance} {
+			if index >= 0 && index < len(t.entries) && t.showsStandIn(t.entries[index]) {
+				t.renderReply(t.entries[index])
+				rendered = true
+			}
+		}
+		if rendered && time.Now().After(deadline) {
+			break
+		}
+	}
+	if rendered {
+		t.rejoin()
+	}
+}
+
+// plainText is the whole transcript without styling or wrapping, replies as
+// their Markdown source and tool calls in full.
 func (t *transcript) plainText() string {
 	var plain strings.Builder
 	for index, entry := range t.entries {
@@ -144,6 +250,9 @@ func (t *transcript) plainText() string {
 			plain.WriteString("\n")
 		}
 		text := entry.text
+		if entry.reply != "" {
+			text = entry.reply
+		}
 		if entry.tool != nil {
 			text = entry.tool.layOut(unwrappedWidth, true, false)
 		}
