@@ -8,9 +8,10 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// TestWrappedCacheMatchesFullWrap pins the invariant B1a relies on:
-// incrementally wrapping each entry as it is appended must produce the same
-// visible output as wrapping the concatenated body in one pass.
+// TestWrappedCacheMatchesFullWrap pins the invariant the transcript's append
+// path relies on: laying out each entry as it is appended must produce the
+// same visible output as wrapping the concatenated text in one pass, and so
+// must laying everything out again at a new width.
 func TestWrappedCacheMatchesFullWrap(t *testing.T) {
 	widths := []int{20, 40, 80, 120}
 	entries := []string{
@@ -22,24 +23,28 @@ func TestWrappedCacheMatchesFullWrap(t *testing.T) {
 		styleMuted.Render("↻ resumed previous session"),
 		styleAssist.Render(strings.Repeat("streamed token ", 40)),
 	}
+	raw := strings.Join(entries, "\n")
 	for _, w := range widths {
-		m := benchModel(w)
-		// Force wrap cache to initialise at this width without touching the
-		// viewport's uninitialised state — appendLine only maintains the
-		// cache once wrapWidth is set.
-		m.rebuildWrapped(w)
-		var raw strings.Builder
-		for i, e := range entries {
-			if i > 0 {
-				raw.WriteString("\n")
-			}
-			raw.WriteString(e)
-			m.appendLine(e)
+		var appended transcript
+		appended.setWidth(w)
+		for _, e := range entries {
+			appended.appendText(e)
 		}
-		got := m.wrappedBody.String()
-		want := ansi.Wrap(raw.String(), w, "")
-		if got != want {
+		want := ansi.Wrap(raw, w, "")
+		if got := appended.body.String(); got != want {
 			t.Fatalf("width=%d: incremental wrap diverged from one-shot wrap\n--- got\n%q\n--- want\n%q", w, got, want)
+		}
+		if appended.lineCount != strings.Count(want, "\n")+1 {
+			t.Errorf("width=%d: lineCount = %d, want %d", w, appended.lineCount, strings.Count(want, "\n")+1)
+		}
+
+		var resized transcript
+		for _, e := range entries {
+			resized.appendText(e)
+		}
+		resized.setWidth(w)
+		if got := resized.body.String(); got != want {
+			t.Fatalf("width=%d: laying out after the fact diverged from one-shot wrap\n--- got\n%q\n--- want\n%q", w, got, want)
 		}
 	}
 }

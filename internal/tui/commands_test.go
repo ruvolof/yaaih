@@ -89,7 +89,7 @@ func TestCompactRefusesWhileATurnIsRunning(t *testing.T) {
 	if cmd := command.Handler(model, ""); cmd != nil {
 		t.Error("/compact started a summarising call on top of a running turn")
 	}
-	notice := model.chatBuf.String()
+	notice := model.transcript.plainText()
 	if !strings.Contains(notice, "busy") || !strings.Contains(notice, "esc") {
 		t.Errorf("notice = %q, want it to say the agent is busy and how to stop it", stripANSI(notice))
 	}
@@ -102,8 +102,8 @@ func TestCompactRefusesWithoutAnAgent(t *testing.T) {
 	if cmd := command.Handler(model, ""); cmd != nil {
 		t.Error("/compact ran with no agent selected")
 	}
-	if !strings.Contains(stripANSI(model.chatBuf.String()), "no agent selected") {
-		t.Errorf("notice = %q, want it to point at the agent picker", stripANSI(model.chatBuf.String()))
+	if !strings.Contains(stripANSI(model.transcript.plainText()), "no agent selected") {
+		t.Errorf("notice = %q, want it to point at the agent picker", stripANSI(model.transcript.plainText()))
 	}
 }
 
@@ -149,9 +149,9 @@ func runCommand(t *testing.T, model *Model, name, args string) string {
 	if !ok {
 		t.Fatalf("/%s is not registered", name)
 	}
-	model.chatBuf.Reset()
+	model.transcript.reset()
 	command.Handler(model, args)
-	return stripANSI(model.chatBuf.String())
+	return stripANSI(model.transcript.plainText())
 }
 
 func TestSkillCommandLoadsASkill(t *testing.T) {

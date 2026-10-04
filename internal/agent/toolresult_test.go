@@ -183,6 +183,28 @@ func TestSpillPointerMatchesAvailableTools(t *testing.T) {
 	}
 }
 
+// The operator reviews a call by its published result. If that were the raw
+// output while the model got a truncated one, the operator would be reasoning
+// about text the model never saw.
+func TestOperatorIsShownTheReplyTheModelReceived(t *testing.T) {
+	huge := "FIRST LINE\n" + distinctLines(20000) + "LAST LINE\n"
+	agent, _ := agentForToolOutput(t, []string{"shell"}, huge)
+
+	events := runTurn(t, agent, "do the thing")
+	reply := toolReply(t, agent.History(), "call-1")
+
+	results := toolResults(events)
+	if len(results) != 1 {
+		t.Fatalf("tool results = %d, want 1", len(results))
+	}
+	if results[0].ID != "call-1" {
+		t.Errorf("result ID = %q, want call-1", results[0].ID)
+	}
+	if results[0].Result != reply.Content {
+		t.Errorf("operator was shown %d bytes, the model was given %d", len(results[0].Result), len(reply.Content))
+	}
+}
+
 // An agent with neither a shell nor filesystem access cannot open a spill file,
 // so the marker must not advertise one.
 func TestNoSpillPointerWithoutAToolToReadIt(t *testing.T) {

@@ -619,7 +619,7 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 				a.endCancelled(&turnEnd, resp.ToolCalls[idx:])
 				return
 			}
-			a.publish(ToolCallStartMsg{Name: tc.Name, Args: tc.Arguments})
+			a.publish(ToolCallStartMsg{ID: tc.ID, Name: tc.Name, Args: tc.Arguments})
 			log.Info("tool call",
 				"name", tc.Name,
 				"id", tc.ID,
@@ -630,8 +630,7 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 			if !ok {
 				result := fmt.Sprintf("error: unknown tool %q", tc.Name)
 				log.Warn("unknown tool requested", "name", tc.Name, "capabilities", a.cfg.Capabilities)
-				a.publish(ToolCallResultMsg{Name: tc.Name, Result: "", Err: result})
-				a.appendToolResult(tc.ID, tc.Name, result)
+				a.answerToolCall(tc, result, result)
 				continue
 			}
 
@@ -652,13 +651,12 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 				case ApprovalDeny:
 					log.Info("tool denied by operator", "tool", tc.Name)
 					msg := "denied by operator"
-					a.publish(ToolCallResultMsg{Name: tc.Name, Err: msg})
-					a.appendToolResult(tc.ID, tc.Name, "error: "+msg)
+					a.answerToolCall(tc, "error: "+msg, msg)
 					continue
 				case ApprovalCancel:
 					log.Info("turn cancelled by operator at tool call", "tool", tc.Name)
-					a.publish(ToolCallResultMsg{Name: tc.Name, Err: "cancelled by operator"})
-					a.endCancelled(&turnEnd, resp.ToolCalls[idx:])
+					a.answerToolCall(tc, cancelledToolResult, "cancelled by operator")
+					a.endCancelled(&turnEnd, resp.ToolCalls[idx+1:])
 					return
 				}
 			}
@@ -668,8 +666,8 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 			elapsed := time.Since(toolStart)
 			if err != nil {
 				if ctx.Err() != nil {
-					a.publish(ToolCallResultMsg{Name: tc.Name, Err: "cancelled by operator"})
-					a.endCancelled(&turnEnd, resp.ToolCalls[idx:])
+					a.answerToolCall(tc, cancelledToolResult, "cancelled by operator")
+					a.endCancelled(&turnEnd, resp.ToolCalls[idx+1:])
 					return
 				}
 				log.Error("tool failed",
@@ -681,8 +679,7 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 				if errors.As(err, &te) {
 					a.publish(TimeoutMsg{Command: te.Command, Message: te.Message})
 				}
-				a.publish(ToolCallResultMsg{Name: tc.Name, Result: result, Err: err.Error()})
-				a.appendToolResult(tc.ID, tc.Name, "error: "+err.Error()+"\n"+result)
+				a.answerToolCall(tc, "error: "+err.Error()+"\n"+result, err.Error())
 				continue
 			}
 			log.Info("tool ok",
@@ -690,8 +687,7 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 				"result_bytes", len(result),
 				"elapsed_ms", elapsed.Milliseconds(),
 			)
-			a.publish(ToolCallResultMsg{Name: tc.Name, Result: result})
-			a.appendToolResult(tc.ID, tc.Name, result)
+			a.answerToolCall(tc, result, "")
 		}
 		// Loop back: send tool results to the model for the next turn.
 	}
@@ -801,8 +797,8 @@ func (a *Agent) callLLMWithRetry(ctx context.Context, req *llm.ChatRequest, iter
 	return lastResp, content.String(), nil
 }
 
-// appendToolResult records a tool response in the conversation history and
-// persists it to the session file.
+// appendToolResult records a tool response in the conversation history,
+// persists it to the session file, and returns the text it recorded.
 //
 // The result is reduced to the configured budget first, and it is the reduced
 // form that is both sent and stored. A tool result is not a one-off cost: it is
@@ -811,13 +807,25 @@ func (a *Agent) callLLMWithRetry(ctx context.Context, req *llm.ChatRequest, iter
 // everything that follows and eventually pushes the session past the context
 // limit for good. Storing the reduced form keeps a resumed transcript honest
 // about what the model was actually shown.
-func (a *Agent) appendToolResult(toolCallID, name, content string) {
+func (a *Agent) appendToolResult(toolCallID, name, content string) string {
+	reduced := a.reduceToolResult(toolCallID, name, content)
 	a.record(llm.Message{
 		Role:       llm.RoleTool,
-		Content:    a.reduceToolResult(toolCallID, name, content),
+		Content:    reduced,
 		ToolCallID: toolCallID,
 		Name:       name,
 	})
+	return reduced
+}
+
+// answerToolCall records the reply to a call that was announced to the
+// operator, then shows the operator that same reply. Publishing the recorded
+// text rather than the tool's own output keeps the transcript faithful: an
+// operator reviewing a call reads exactly what the model was given. failure is
+// a short reason, empty when the call succeeded.
+func (a *Agent) answerToolCall(call llm.ToolCall, content, failure string) {
+	reduced := a.appendToolResult(call.ID, call.Name, content)
+	a.publish(ToolCallResultMsg{ID: call.ID, Name: call.Name, Result: reduced, Err: failure})
 }
 
 // reduceToolResult normalises a tool result and bounds it to the configured

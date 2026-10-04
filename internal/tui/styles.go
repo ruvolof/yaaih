@@ -33,16 +33,17 @@ var (
 				BorderForeground(colorAccent).
 				Padding(0, 1)
 
-	styleHeader  = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	styleMuted   = lipgloss.NewStyle().Foreground(colorMuted)
-	styleUser    = lipgloss.NewStyle().Foreground(colorUser).Bold(true)
-	styleAssist  = lipgloss.NewStyle().Foreground(colorFG)
-	styleTool    = lipgloss.NewStyle().Foreground(colorAccent)
-	styleToolRes = lipgloss.NewStyle().Foreground(colorMuted)
-	styleOK      = lipgloss.NewStyle().Foreground(colorOK)
-	styleErr     = lipgloss.NewStyle().Foreground(colorErr).Bold(true)
-	styleWarn    = lipgloss.NewStyle().Foreground(colorWarn).Bold(true)
-	styleWarnBlk = lipgloss.NewStyle().
+	styleHeader   = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+	styleMuted    = lipgloss.NewStyle().Foreground(colorMuted)
+	styleUser     = lipgloss.NewStyle().Foreground(colorUser).Bold(true)
+	styleAssist   = lipgloss.NewStyle().Foreground(colorFG)
+	styleTool     = lipgloss.NewStyle().Foreground(colorAccent)
+	styleToolRes  = lipgloss.NewStyle().Foreground(colorMuted)
+	styleSelected = lipgloss.NewStyle().Foreground(colorBG).Background(colorAccent).Bold(true)
+	styleOK       = lipgloss.NewStyle().Foreground(colorOK)
+	styleErr      = lipgloss.NewStyle().Foreground(colorErr).Bold(true)
+	styleWarn     = lipgloss.NewStyle().Foreground(colorWarn).Bold(true)
+	styleWarnBlk  = lipgloss.NewStyle().
 			Foreground(colorWarn).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorWarn).

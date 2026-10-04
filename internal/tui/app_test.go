@@ -36,25 +36,25 @@ func TestContextWarningAppearsOnceThenRearms(t *testing.T) {
 	m := &Model{}
 
 	m.noteContextFill(4000, 64_000) // 6%
-	if body := m.chatBuf.String(); body != "" {
+	if body := m.transcript.plainText(); body != "" {
 		t.Fatalf("warned at 6%% full: %q", stripANSI(body))
 	}
 
 	m.noteContextFill(58_000, 64_000) // 90%
-	warning := stripANSI(m.chatBuf.String())
+	warning := stripANSI(m.transcript.plainText())
 	if !strings.Contains(warning, "90% full") || !strings.Contains(warning, "/compact") {
 		t.Fatalf("warning = %q, want the fill level and what to do about it", warning)
 	}
 
 	m.noteContextFill(60_000, 64_000) // 93%, still the same filling
-	if got := strings.Count(stripANSI(m.chatBuf.String()), "/compact"); got != 1 {
+	if got := strings.Count(stripANSI(m.transcript.plainText()), "/compact"); got != 1 {
 		t.Errorf("warned %d times during one filling, want 1", got)
 	}
 
 	// A /compact drops the fill; the next filling deserves its own warning.
 	m.noteContextFill(9_000, 64_000)
 	m.noteContextFill(59_000, 64_000)
-	if got := strings.Count(stripANSI(m.chatBuf.String()), "/compact"); got != 2 {
+	if got := strings.Count(stripANSI(m.transcript.plainText()), "/compact"); got != 2 {
 		t.Errorf("warned %d times across two fillings, want 2", got)
 	}
 }
@@ -64,7 +64,7 @@ func TestContextWarningStaysQuietWithoutABudget(t *testing.T) {
 	m.noteContextFill(0, 0)
 	m.noteContextFill(5_000, 0)
 
-	if body := m.chatBuf.String(); body != "" {
+	if body := m.transcript.plainText(); body != "" {
 		t.Errorf("warned with windowing disabled: %q", stripANSI(body))
 	}
 	if strings.Contains(m.renderSidebar(), "Context") {
@@ -87,25 +87,25 @@ func TestSpendWarningAppearsOnceThenRearmsForTheNextSession(t *testing.T) {
 	m := &Model{}
 
 	m.noteSpend(limitedStats(10_000, 0.5, true))
-	if body := m.chatBuf.String(); body != "" {
+	if body := m.transcript.plainText(); body != "" {
 		t.Fatalf("warned at half the limit: %q", stripANSI(body))
 	}
 
 	m.noteSpend(limitedStats(10_000, 0.85, true))
-	warning := stripANSI(m.chatBuf.String())
+	warning := stripANSI(m.transcript.plainText())
 	if !strings.Contains(warning, "85%") || !strings.Contains(warning, "/new") {
 		t.Fatalf("warning = %q, want how close the limit is and what to do about it", warning)
 	}
 
 	m.noteSpend(limitedStats(95_000, 0.9, true))
-	if got := strings.Count(stripANSI(m.chatBuf.String()), "spending limit"); got != 1 {
+	if got := strings.Count(stripANSI(m.transcript.plainText()), "spending limit"); got != 1 {
 		t.Errorf("warned %d times approaching one limit, want 1", got)
 	}
 
 	// /new starts from nothing; that session's approach deserves its own warning.
 	m.noteSpend(limitedStats(0, 0, true))
 	m.noteSpend(limitedStats(90_000, 0.1, true))
-	if got := strings.Count(stripANSI(m.chatBuf.String()), "spending limit"); got != 2 {
+	if got := strings.Count(stripANSI(m.transcript.plainText()), "spending limit"); got != 2 {
 		t.Errorf("warned %d times across two sessions, want 2", got)
 	}
 }
@@ -115,7 +115,7 @@ func TestUnenforceableCostLimitIsReportedOnce(t *testing.T) {
 	m.noteSpend(limitedStats(100, 0, false))
 	m.noteSpend(limitedStats(200, 0, false))
 
-	body := stripANSI(m.chatBuf.String())
+	body := stripANSI(m.transcript.plainText())
 	if got := strings.Count(body, "cannot be enforced"); got != 1 {
 		t.Errorf("warned %d times about an unenforced cost limit, want 1: %q", got, body)
 	}
@@ -152,7 +152,7 @@ func TestNarrationIsCommittedAboveTheToolCallItIntroduced(t *testing.T) {
 	m.pendingAs.WriteString("There are three agents.")
 	m.commitAssistant()
 
-	transcript := strings.Split(stripANSI(m.chatBuf.String()), "\n")
+	transcript := strings.Split(stripANSI(m.transcript.plainText()), "\n")
 	want := []string{
 		"Let me list the workspace.",
 		"→ shell_exec {\"command\":\"ls\"}",
@@ -177,7 +177,7 @@ func TestCommittingAnEmptyReplyChangesNothing(t *testing.T) {
 	m.appendLine("only line")
 	m.commitAssistant()
 
-	if body := stripANSI(m.chatBuf.String()); body != "only line" {
+	if body := stripANSI(m.transcript.plainText()); body != "only line" {
 		t.Errorf("transcript = %q, want it untouched", body)
 	}
 }

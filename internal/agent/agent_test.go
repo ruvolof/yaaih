@@ -235,9 +235,6 @@ func TestSendRefusesToolOutsideCapabilities(t *testing.T) {
 	if !strings.Contains(results[0].Err, "unknown tool") {
 		t.Errorf("tool result err = %q, want it to name the tool as unknown", results[0].Err)
 	}
-	if results[0].Result != "" {
-		t.Errorf("refused tool still produced output %q", results[0].Result)
-	}
 
 	// The rejection has to reach the model as a tool reply, or the next
 	// request carries an unanswered tool_call and the provider rejects it.
@@ -251,6 +248,9 @@ func TestSendRefusesToolOutsideCapabilities(t *testing.T) {
 	}
 	if !strings.Contains(last.Content, "unknown tool") {
 		t.Errorf("tool reply content = %q, want it to name the tool as unknown", last.Content)
+	}
+	if results[0].Result != last.Content {
+		t.Errorf("operator was shown %q, but the model was given %q", results[0].Result, last.Content)
 	}
 
 	if errs := errorMessages(events); len(errs) != 0 {

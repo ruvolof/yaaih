@@ -68,18 +68,9 @@ type Model struct {
 	width  int
 	height int
 
-	chat      viewport.Model
-	chatBuf   strings.Builder
-	pendingAs strings.Builder // assistant content currently being streamed
-
-	// wrappedBody is chatBuf pre-wrapped to wrapWidth. Kept in sync
-	// incrementally by appendLine so the streaming hot path does not re-wrap
-	// the whole transcript on every AssistantDeltaMsg; a full rebuild happens
-	// only in rebuildWrapped, which is called from renderChat when the width
-	// changes (WindowSizeMsg / relayout). This is the fix for the O(n²) chat
-	// rendering described in REVIEW.md B1.
-	wrappedBody strings.Builder
-	wrapWidth   int // width wrappedBody was computed at; 0 = uninitialized
+	chat       viewport.Model
+	transcript transcript
+	pendingAs  strings.Builder // assistant content currently being streamed
 
 	// renderPending / renderTicking coalesce bursts of AssistantDeltaMsg into
 	// one repaint every renderTickInterval instead of one per chunk. Cleared
@@ -109,8 +100,8 @@ type Model struct {
 	cancelTurn context.CancelFunc
 
 	// lastAssistant holds the plain-text version of the most recent completed
-	// assistant message so ctrl+y can copy it without depending on chatBuf's
-	// styling. Updated in commitAssistant.
+	// assistant message so ctrl+y can copy it without depending on the
+	// transcript's styling. Updated in commitAssistant.
 	lastAssistant string
 
 	// toast is a short status hint shown in the sidebar (e.g. "copied 412
@@ -252,14 +243,12 @@ func (m *Model) prefillFromHistory(history []llm.Message) {
 				m.lastAssistant = msg.Content
 			}
 			for _, tc := range msg.ToolCalls {
-				m.appendLine(styleTool.Render(fmt.Sprintf("→ %s %s", tc.Name, truncate(tc.Arguments, 200))))
+				m.startTool(tc.ID, tc.Name, tc.Arguments)
 			}
 		case llm.RoleTool:
-			if rest, ok := strings.CutPrefix(msg.Content, "error:"); ok {
-				m.appendLine(styleErr.Render("  ✗ " + truncate(strings.TrimSpace(rest), 600)))
-			} else {
-				m.appendLine(styleToolRes.Render("  ✓ " + truncate(msg.Content, 600)))
-			}
+			// A session file keeps the reply but not whether the tool failed;
+			// every failure reply the agent records starts with this prefix.
+			m.finishTool(msg.ToolCallID, msg.Name, msg.Content, strings.HasPrefix(msg.Content, "error:"))
 		}
 	}
 }
@@ -309,10 +298,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		// Forward all mouse events to the chat viewport. It only acts on
-		// wheel events (MouseWheelEnabled defaults to true); clicks and
-		// drags are no-ops for us. Track auto-stick after each wheel so
-		// scrolling back down re-engages it.
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			if entry := m.toolAt(msg.X, msg.Y); entry != nil {
+				m.toggleTool(entry)
+			}
+			return m, nil
+		}
+		// Forward the rest to the chat viewport, which only acts on the wheel.
+		// Track auto-stick after each wheel so scrolling back down re-engages
+		// it.
 		var cmd tea.Cmd
 		m.chat, cmd = m.chat.Update(msg)
 		m.userScrolled = !m.chat.AtBottom()
@@ -377,6 +371,32 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+t":
 			cmds = append(cmds, m.copyTranscript())
 			return m, tea.Batch(cmds...)
+		case "ctrl+o":
+			target := m.transcript.selected
+			if target == nil {
+				target = m.transcript.toolBefore(len(m.transcript.entries))
+			}
+			if target == nil {
+				return m, m.setToast("no tool calls to expand")
+			}
+			m.toggleTool(target)
+			return m, tea.Batch(cmds...)
+		case "alt+up":
+			from := len(m.transcript.entries)
+			if m.transcript.selected != nil {
+				from = m.transcript.selected.index
+			}
+			if previous := m.transcript.toolBefore(from); previous != nil {
+				m.selectTool(previous)
+			}
+			return m, tea.Batch(cmds...)
+		case "alt+down":
+			if m.transcript.selected != nil {
+				// Moving down past the newest call leaves selection mode, and
+				// ctrl+o goes back to acting on the newest call.
+				m.selectTool(m.transcript.toolAfter(m.transcript.selected.index))
+			}
+			return m, tea.Batch(cmds...)
 		case "pgup", "pgdown":
 			// Selectively forward page-scroll keys to the viewport. The
 			// viewport's default keymap also recognises f/b/u/d/j/k/space,
@@ -404,6 +424,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.updateInput(msg))
 		case "enter":
 			text := strings.TrimSpace(m.input.Value())
+			if text == "" && m.transcript.selected != nil {
+				m.toggleTool(m.transcript.selected)
+				return m, tea.Batch(cmds...)
+			}
 			m.inputHistory.record(text)
 			if text != "" && strings.HasPrefix(text, "/") {
 				// Slash command: dispatch to a built-in handler instead of
@@ -434,9 +458,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Sending a message is an explicit "show me what happens
 				// next" signal — snap back to the bottom even if the user
 				// scrolled up while reading the previous reply. Without
-				// this the just-typed message lands in chatBuf below the
-				// visible area and the user thinks the UI froze.
+				// this the just-typed message lands below the visible area
+				// and the user thinks the UI froze. A selection left over
+				// from reviewing the last turn would otherwise keep ctrl+o
+				// pointed at an old call.
 				m.userScrolled = false
+				m.selectTool(nil)
 				m.appendLine(styleUser.Render("You: ") + text)
 				m.setInput("")
 				// The cmd goroutine runs alongside the bubbletea event loop,
@@ -482,15 +509,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, waitForEvent(m.ag.Events()))
 
 	case agent.ToolCallStartMsg:
-		m.appendLine(styleTool.Render(fmt.Sprintf("→ %s %s", msg.Name, truncate(msg.Args, 200))))
+		m.startTool(msg.ID, msg.Name, msg.Args)
 		cmds = append(cmds, waitForEvent(m.ag.Events()))
 
 	case agent.ToolCallResultMsg:
-		if msg.Err != "" {
-			m.appendLine(styleErr.Render("  ✗ " + msg.Err))
-		} else {
-			m.appendLine(styleToolRes.Render("  ✓ " + truncate(msg.Result, 600)))
-		}
+		m.finishTool(msg.ID, msg.Name, msg.Result, msg.Err != "")
 		cmds = append(cmds, waitForEvent(m.ag.Events()))
 
 	case agent.TimeoutMsg:
@@ -666,10 +689,10 @@ func (m *Model) copyLastReply() tea.Cmd {
 	return m.setToast(fmt.Sprintf("copied last reply (%d chars)", len(m.lastAssistant)))
 }
 
-// copyTranscript copies the full chat buffer to the clipboard, with ANSI
-// styling stripped so the receiving app gets readable plain text.
+// copyTranscript copies the whole conversation to the clipboard as plain text,
+// every tool call in full whether or not it is expanded on screen.
 func (m *Model) copyTranscript() tea.Cmd {
-	body := stripANSI(m.chatBuf.String())
+	body := m.transcript.plainText()
 	if body == "" {
 		return m.setToast("nothing to copy yet")
 	}
@@ -701,8 +724,7 @@ func stripANSI(s string) string {
 
 // resetChat clears the chat view back to empty. Used when switching sessions.
 func (m *Model) resetChat() {
-	m.chatBuf.Reset()
-	m.wrappedBody.Reset()
+	m.transcript.reset()
 	m.pendingAs.Reset()
 	m.renderPending = false
 	m.lastAssistant = ""
@@ -857,8 +879,8 @@ func (m *Model) commitAssistant() {
 		return
 	}
 	// Render and clear pendingAs BEFORE appendLine — appendLine calls
-	// renderChat synchronously, and renderChat re-adds pendingAs on top of
-	// chatBuf. Without the reset-first, the reply shows twice until the next
+	// renderChat synchronously, and renderChat draws pendingAs below the
+	// transcript. Without the reset-first, the reply shows twice until the next
 	// event triggers another render.
 	plain := m.pendingAs.String()
 	rendered := styleAssist.Render(plain)
@@ -872,45 +894,110 @@ func (m *Model) commitAssistant() {
 }
 
 func (m *Model) appendLine(s string) {
-	if m.chatBuf.Len() > 0 {
-		m.chatBuf.WriteString("\n")
-	}
-	m.chatBuf.WriteString(s)
-	if m.wrapWidth > 0 {
-		// Wrap only the new entry and append to the cache — the O(1)-amortised
-		// path that keeps streaming cost independent of transcript length.
-		// ansi.Wrap treats each embedded \n as a hard break, so wrapping one
-		// entry in isolation and joining with \n produces the same visible
-		// output as wrapping the concatenation.
-		if m.wrappedBody.Len() > 0 {
-			m.wrappedBody.WriteString("\n")
-		}
-		m.wrappedBody.WriteString(ansi.Wrap(s, m.wrapWidth, ""))
-	}
+	m.transcript.appendText(s)
 	m.renderChat()
 }
 
-func (m *Model) renderChat() {
-	w := m.chat.Width
-	if w <= 0 {
-		// Viewport not sized yet (pre-WindowSizeMsg). Push the raw text
-		// through so prefilled history isn't lost; the first WindowSizeMsg
-		// arrives soon after and re-renders with wrap.
-		m.chat.SetContent(m.chatBuf.String())
+// startTool shows a call the agent is about to run, collapsed.
+func (m *Model) startTool(id, name, args string) {
+	m.transcript.appendTool(&toolCall{id: id, name: name, args: args})
+	m.renderChat()
+}
+
+// finishTool fills in the reply under the call it answers. A reply whose call
+// was never shown gets an entry of its own rather than being dropped.
+func (m *Model) finishTool(id, name, result string, failed bool) {
+	entry := m.transcript.unansweredTool(id)
+	if entry == nil {
+		entry = m.transcript.appendTool(&toolCall{id: id, name: name})
+	}
+	entry.tool.result = result
+	entry.tool.answered = true
+	entry.tool.failed = failed
+	m.transcript.refresh(entry)
+	m.renderChat()
+}
+
+// toggleTool expands or collapses a tool call, keeping the view where the
+// operator is reading instead of jumping to the bottom.
+func (m *Model) toggleTool(entry *chatEntry) {
+	entry.expanded = !entry.expanded
+	m.transcript.refresh(entry)
+	m.renderChatInPlace()
+	m.scrollToEntry(entry)
+}
+
+// selectTool moves the alt+↑/↓ selection to entry, or clears it for nil.
+func (m *Model) selectTool(entry *chatEntry) {
+	previous := m.transcript.selected
+	if previous == entry {
 		return
 	}
-	if m.wrapWidth != w {
-		m.rebuildWrapped(w)
+	m.transcript.selected = entry
+	m.transcript.refresh(previous, entry)
+	m.renderChatInPlace()
+	if entry != nil {
+		m.scrollToEntry(entry)
 	}
+}
+
+// renderChatInPlace re-renders without following new content to the bottom.
+func (m *Model) renderChatInPlace() {
+	m.userScrolled = true
+	m.renderChat()
+	m.chat.SetYOffset(m.chat.YOffset)
+	m.userScrolled = !m.chat.AtBottom()
+}
+
+// scrollToEntry brings as much of entry into view as fits, its first line
+// always among it.
+func (m *Model) scrollToEntry(entry *chatEntry) {
+	if m.chat.Height <= 0 {
+		return
+	}
+	top := entry.firstLine
+	bottom := top + entry.lineCount - 1
+	switch {
+	case top < m.chat.YOffset:
+		m.chat.SetYOffset(top)
+	case bottom >= m.chat.YOffset+m.chat.Height:
+		m.chat.SetYOffset(min(top, bottom-m.chat.Height+1))
+	}
+	m.userScrolled = !m.chat.AtBottom()
+}
+
+// toolAt returns the tool call drawn at screen cell (x, y), or nil. The chat
+// box is the first thing in the layout, so its content starts just inside its
+// border and padding.
+func (m *Model) toolAt(x, y int) *chatEntry {
+	left := styleChatBorder.GetBorderLeftSize() + styleChatBorder.GetPaddingLeft()
+	top := styleChatBorder.GetBorderTopSize() + styleChatBorder.GetPaddingTop()
+	if x < left || x >= left+m.chat.Width || y < top || y >= top+m.chat.Height {
+		return nil
+	}
+	entry := m.transcript.entryAtLine(y - top + m.chat.YOffset)
+	if entry == nil || entry.tool == nil {
+		return nil
+	}
+	return entry
+}
+
+func (m *Model) renderChat() {
+	width := m.chat.Width
+	if width <= 0 {
+		// Not sized yet; the first WindowSizeMsg lays the transcript out.
+		return
+	}
+	m.transcript.setWidth(width)
 	// Pre-wrap the body before handing it to SetContent. Without this the
 	// viewport's View() picks the last Height LOGICAL lines and lipgloss
 	// then re-wraps them — if any wrap to multiple visual lines, lipgloss's
 	// MaxHeight clips the BOTTOM of the rendered block, hiding the end of
 	// the most recent reply. ansi.Wrap is ANSI-aware and width-correct for
 	// wide-cell characters.
-	body := m.wrappedBody.String()
+	body := m.transcript.body.String()
 	if m.pendingAs.Len() > 0 {
-		pending := ansi.Wrap(styleAssist.Render(m.pendingAs.String()), w, "")
+		pending := ansi.Wrap(styleAssist.Render(m.pendingAs.String()), width, "")
 		if body != "" {
 			body = body + "\n" + pending
 		} else {
@@ -921,19 +1008,6 @@ func (m *Model) renderChat() {
 	if !m.userScrolled {
 		m.chat.GotoBottom()
 	}
-}
-
-// rebuildWrapped recomputes the wrapped-line cache from chatBuf at the given
-// width. Called from renderChat when the viewport width changes (resize, or
-// the first WindowSizeMsg after startup). Never called on the per-delta hot
-// path — that's the point of the cache.
-func (m *Model) rebuildWrapped(width int) {
-	m.wrapWidth = width
-	m.wrappedBody.Reset()
-	if m.chatBuf.Len() == 0 {
-		return
-	}
-	m.wrappedBody.WriteString(ansi.Wrap(m.chatBuf.String(), width, ""))
 }
 
 func (m *Model) renderSidebar() string {
@@ -1004,6 +1078,8 @@ func (m *Model) renderSidebar() string {
 	fmt.Fprintln(&b, styleMuted.Render("↑/↓ history  tab complete"))
 	fmt.Fprintln(&b, styleMuted.Render("^y copy reply"))
 	fmt.Fprintln(&b, styleMuted.Render("^t copy chat"))
+	fmt.Fprintln(&b, styleMuted.Render("^o/click expand tool"))
+	fmt.Fprintln(&b, styleMuted.Render("alt+↑/↓ select tool"))
 	fmt.Fprintln(&b, styleMuted.Render("pgup/pgdn scroll"))
 	fmt.Fprintln(&b, styleMuted.Render("^home/^end top/btm"))
 	fmt.Fprintln(&b, styleMuted.Render("wheel  scroll"))

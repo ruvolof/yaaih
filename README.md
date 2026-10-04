@@ -162,6 +162,22 @@ Switching agents starts a clean session; sessions are per-agent, so `/resume` on
 - **↑ / ↓** walk back and forth through what you have sent, slash commands included, when the box is empty or still holds an entry you recalled unchanged. Once you edit it, the arrows move the cursor again. The history lasts the whole run, across agent switches.
 - **Tab** completes slash commands, and the argument of `/resume` (every agent's sessions), `/new` (agents), `/skill` (skills not loaded yet), and `/sessions` (`all`). When there is more than one match, Tab fills in as much as the matches share, then lists them.
 
+### Reviewing tool calls
+
+Each tool call shows collapsed in the conversation: the call on one line, a
+preview of its reply below. Expanded, it shows every argument and the whole
+reply — the reply exactly as the model received it, so after the harness
+shortens a long output, the expanded call shows the shortened text the model
+worked from.
+
+- **Click** a call to expand or collapse it.
+- **Ctrl+O** expands or collapses the newest call, or the selected one.
+- **Alt+↑ / Alt+↓** select an earlier or later call, scrolling it into view;
+  **Enter** on an empty input box toggles the selection. Alt+↓ past the newest
+  call clears it, and so does sending a message.
+
+**Ctrl+T** copies the whole conversation with every call expanded.
+
 ### Docker runtime
 
 The harness uses Docker to run tool execution in a sandbox container.

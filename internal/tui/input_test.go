@@ -289,7 +289,7 @@ func TestTabCompletesSessionsAcrossAgents(t *testing.T) {
 	if got := model.input.Value(); got != "/resume 2026100" {
 		t.Fatalf("input = %q, want it left alone with three sessions matching", got)
 	}
-	if listed := stripANSI(model.chatBuf.String()); !strings.Contains(listed, "20261003-090000-cccc") {
+	if listed := stripANSI(model.transcript.plainText()); !strings.Contains(listed, "20261003-090000-cccc") {
 		t.Errorf("Tab did not list the matching sessions: %q", listed)
 	}
 

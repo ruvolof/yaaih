@@ -26,17 +26,23 @@ type AssistantDoneMsg struct {
 	Cancelled bool
 }
 
-// ToolCallStartMsg announces an imminent tool invocation.
+// ToolCallStartMsg announces an imminent tool invocation. ID pairs it with the
+// ToolCallResultMsg that answers it.
 type ToolCallStartMsg struct {
+	ID   string
 	Name string
 	Args string
 }
 
-// ToolCallResultMsg carries the (possibly truncated) result of a tool.
+// ToolCallResultMsg carries the reply to a tool call. Result is the reply
+// exactly as the model receives it — normalised, bounded, and with the
+// "error:" prefix when the call failed — not the tool's raw output. Err is a
+// short reason for the failure, empty on success.
 type ToolCallResultMsg struct {
+	ID     string
 	Name   string
 	Result string
-	Err    string // empty on success
+	Err    string
 }
 
 // TimeoutMsg is rendered as a prominent warning in the TUI.
