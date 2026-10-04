@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -329,5 +330,55 @@ func TestSidebarShowsWhatRunsWithoutAsking(t *testing.T) {
 		if want := append([]string{"Approval"}, tc.want...); !slices.Equal(lines, want) {
 			t.Errorf("standing %+v renders %q, want %q", tc.standing, lines, want)
 		}
+	}
+}
+
+// On a terminal shorter than the sidebar, the sidebar must neither push the
+// input off the screen nor hide the rest of itself out of reach.
+func TestSidebarScrollsOnAShortTerminal(t *testing.T) {
+	bare := newTestModel(t)
+	m := New(context.Background(), nil, bare.ag, nil, "", "test", nil)
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	for index := range 40 {
+		m.appendLine(fmt.Sprintf("narration %02d", index))
+	}
+	screen := func() []string { return strings.Split(stripANSI(m.View()), "\n") }
+
+	rows := screen()
+	if len(rows) != m.height {
+		t.Fatalf("screen is %d rows tall, want %d", len(rows), m.height)
+	}
+	if !strings.Contains(rows[m.mainHeight()], "more (wheel)") {
+		t.Errorf("the sidebar's last row %q does not say there is more below", rows[m.mainHeight()])
+	}
+	if strings.Contains(strings.Join(rows, "\n"), "^c quit") {
+		t.Fatal("the whole sidebar fits; the test needs a shorter screen")
+	}
+
+	sidebarX := m.chatBoxWidth() + 4
+	chatBottom := m.chat.YOffset
+	for range 20 {
+		m.Update(tea.MouseMsg{X: sidebarX, Y: 3, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	}
+	rows = screen()
+	if len(rows) != m.height {
+		t.Errorf("screen is %d rows tall after scrolling the sidebar, want %d", len(rows), m.height)
+	}
+	if !strings.Contains(strings.Join(rows, "\n"), "^c quit") {
+		t.Error("scrolling the sidebar to the end does not reach its last line")
+	}
+	if !strings.Contains(rows[1], "more") {
+		t.Errorf("the sidebar's first row %q does not say there is more above", rows[1])
+	}
+	if m.chat.YOffset != chatBottom || m.userScrolled {
+		t.Error("the wheel over the sidebar scrolled the conversation")
+	}
+
+	m.Update(tea.MouseMsg{X: 3, Y: 3, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp})
+	if m.chat.YOffset >= chatBottom {
+		t.Error("the wheel over the conversation no longer scrolls it")
+	}
+	if scrolled := m.sidebarScroll; scrolled == 0 {
+		t.Error("the wheel over the conversation scrolled the sidebar back")
 	}
 }

@@ -1,6 +1,6 @@
 // Root BubbleTea model: chat viewport on the left, stats sidebar on the right,
-// input bar across the bottom, and an approval modal overlay when a
-// restricted tool needs operator confirmation.
+// input bar across the bottom, and an approval panel docked above the input
+// when a restricted tool needs operator confirmation.
 package tui
 
 import (
@@ -132,9 +132,19 @@ type Model struct {
 	spendWarned     bool
 	costLimitWarned bool
 
-	pendingApproval *agent.ApprovalRequest
-	approvalFields  []approvalField
-	approvalScroll  int
+	// pendingApproval is the restricted call waiting on the operator. Its panel
+	// takes approvalHeight rows above the input, measured on every relayout,
+	// and the conversation shrinks to make room for it rather than being
+	// covered.
+	pendingApproval   *agent.ApprovalRequest
+	approvalFields    []approvalField
+	approvalScroll    int
+	approvalCollapsed bool
+	approvalHeight    int
+
+	// sidebarScroll is how many sidebar rows the wheel has scrolled past, for
+	// a terminal too short to show the whole sidebar.
+	sidebarScroll int
 }
 
 // toastExpiredMsg is delivered by a tea.Tick to clear an old toast. The
@@ -308,12 +318,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.scheduleReplyRendering())
 
 	case tea.MouseMsg:
-		if m.pendingApproval != nil {
+		if m.pendingApproval != nil && m.handleApprovalMouse(msg) {
+			return m, nil
+		}
+		if m.overSidebar(msg.X, msg.Y) {
 			switch msg.Button {
 			case tea.MouseButtonWheelUp:
-				m.scrollApproval(-3)
+				m.scrollSidebar(-3)
 			case tea.MouseButtonWheelDown:
-				m.scrollApproval(3)
+				m.scrollSidebar(3)
 			}
 			return m, nil
 		}
@@ -332,42 +345,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 
 	case tea.KeyMsg:
-		// Approval modal grabs keys first.
 		if m.pendingApproval != nil {
-			switch msg.String() {
-			case "y", "Y":
-				m.pendingApproval.Approve()
-				m.pendingApproval = nil
-			case "a":
-				m.pendingApproval.ApproveTool()
-				m.pendingApproval = nil
-			case "A":
-				m.pendingApproval.ApproveAll()
-				m.pendingApproval = nil
-			case "n", "N":
-				// Deny this call but let the agent keep iterating — the
-				// model may try a different tool / approach.
-				m.pendingApproval.Deny()
-				m.pendingApproval = nil
-			case "q", "Q", "esc":
-				// Cancel the entire turn — break the model out of whatever
-				// loop it's in and return control to the operator.
-				m.pendingApproval.Cancel()
-				m.pendingApproval = nil
-			case "up", "k":
-				m.scrollApproval(-1)
-			case "down", "j":
-				m.scrollApproval(1)
-			case "pgup":
-				m.scrollApproval(-m.approvalBodyHeight())
-			case "pgdown":
-				m.scrollApproval(m.approvalBodyHeight())
-			case "home", "g":
-				m.approvalScroll = 0
-			case "end", "G":
-				m.approvalScroll = m.approvalMaxScroll()
+			if m.handleApprovalKey(msg.String()) || !keysBesideApproval[msg.String()] {
+				return m, nil
 			}
-			return m, nil
 		}
 		switch msg.String() {
 		case "ctrl+c", "ctrl+d":
@@ -377,7 +358,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// cancellation point and reports back with a cancelled
 			// AssistantDoneMsg, so the marker below is a promise that the
 			// turn is stopping, not that it has stopped. Idle, esc does
-			// nothing — the approval modal handles its own esc above.
+			// nothing — the approval panel handles its own esc above.
 			if m.busy && m.cancelTurn != nil {
 				log.Info("operator cancelled turn")
 				m.cancelTurn()
@@ -555,9 +536,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, waitForEvent(m.ag.Events()))
 
 	case agent.ApprovalRequestMsg:
-		m.pendingApproval = msg.Request
-		m.approvalFields = parseApprovalArgs(msg.Request.Args)
-		m.approvalScroll = 0
+		m.openApproval(msg.Request)
 		cmds = append(cmds, waitForEvent(m.ag.Events()))
 
 	case agent.ErrorMsg:
@@ -615,33 +594,18 @@ func (m *Model) View() string {
 	}
 
 	// Layout: chat (left, ~75%) | sidebar (right, ~25%), then input full width.
-	sidebarW := m.width / 4
-	if sidebarW < 28 {
-		sidebarW = 28
-	}
-	chatW := m.width - sidebarW - 4 // border allowance
-	if chatW < 20 {
-		chatW = 20
-	}
-	inputH := m.input.Height() + 2
-	// One-row status line between the main area and the input. Always
-	// rendered (empty when idle) so layout doesn't shift the chat as the
-	// agent transitions in and out of busy.
-	statusH := 1
-	mainH := m.height - inputH - statusH - 2
-	if mainH < 5 {
-		mainH = 5
-	}
+	sidebarW := m.sidebarWidth()
+	mainH := m.mainHeight()
 
 	chatBox := styleChatBorder.
-		Width(chatW).
+		Width(m.chatBoxWidth()).
 		Height(mainH).
 		Render(m.chat.View())
 
 	sidebar := styleSidebarBorder.
 		Width(sidebarW).
 		Height(mainH).
-		Render(m.renderSidebar())
+		Render(m.sidebarWindow(sidebarW-styleSidebarBorder.GetHorizontalPadding(), mainH))
 
 	main := lipgloss.JoinHorizontal(lipgloss.Top, chatBox, sidebar)
 
@@ -651,41 +615,106 @@ func (m *Model) View() string {
 		Width(m.width - 2).
 		Render(m.input.View())
 
-	full := lipgloss.JoinVertical(lipgloss.Left, main, statusLine, inputBox)
-
+	rows := []string{main, statusLine}
 	if m.pendingApproval != nil {
-		modal := styleApproval.Render(m.renderApproval())
-		return overlayCenter(full, modal, m.width, m.height)
+		rows = append(rows, m.renderApprovalPanel())
 	}
-	return styleApp.Render(full)
+	rows = append(rows, inputBox)
+	return styleApp.Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
+}
+
+func (m *Model) sidebarWidth() int {
+	return max(m.width/4, 28)
+}
+
+// chatBoxWidth is the chat box's width inside its border.
+func (m *Model) chatBoxWidth() int {
+	return max(m.width-m.sidebarWidth()-4, 20)
+}
+
+// mainHeight is the rows inside the border of the chat box and the sidebar:
+// the screen less the input box, the approval panel, and the one-row status
+// line, which is always reserved (blank when idle) so the chat does not shift
+// as the agent goes in and out of busy.
+func (m *Model) mainHeight() int {
+	return max(m.height-(m.input.Height()+2)-1-m.approvalHeight-2, 5)
+}
+
+func (m *Model) sidebarLines() []string {
+	return strings.Split(strings.TrimRight(m.renderSidebar(), "\n"), "\n")
+}
+
+// sidebarWindow is the part of the sidebar that fits in height rows, from
+// sidebarScroll on. A sidebar taller than that would stretch the row and push
+// the approval panel and the input off the screen, and a line wider than width
+// would wrap onto a row of its own, so both are cut. The first and last rows
+// say how much is cut off above and below.
+func (m *Model) sidebarWindow(width, height int) string {
+	lines := m.sidebarLines()
+	first := min(m.sidebarScroll, max(len(lines)-height, 0))
+	last := min(first+height, len(lines))
+	visible := make([]string, 0, last-first)
+	for _, line := range lines[first:last] {
+		visible = append(visible, ansi.Truncate(line, width, "…"))
+	}
+	if first > 0 {
+		visible[0] = styleMuted.Render(fmt.Sprintf("▲ %d more", first+1))
+	}
+	if last < len(lines) {
+		visible[len(visible)-1] = styleMuted.Render(fmt.Sprintf("▼ %d more (wheel)", len(lines)-last+1))
+	}
+	return strings.Join(visible, "\n")
+}
+
+func (m *Model) scrollSidebar(delta int) {
+	maxScroll := max(len(m.sidebarLines())-m.mainHeight(), 0)
+	m.sidebarScroll = min(max(m.sidebarScroll+delta, 0), maxScroll)
+}
+
+// overSidebar reports whether screen cell (x, y) is on the sidebar box,
+// border included.
+func (m *Model) overSidebar(x, y int) bool {
+	sidebarLeft := m.chatBoxWidth() + styleChatBorder.GetHorizontalBorderSize()
+	return x >= sidebarLeft && y < m.mainHeight()+styleSidebarBorder.GetVerticalBorderSize()
 }
 
 // relayout adjusts inner viewport/input sizes after a WindowSizeMsg or a change
 // in the input box's height. The actual wrap-cache rebuild happens inside
 // renderChat when it notices the width has changed.
 func (m *Model) relayout() {
-	sidebarW := m.width / 4
-	if sidebarW < 28 {
-		sidebarW = 28
-	}
-	chatW := m.width - sidebarW - 6
-	if chatW < 20 {
-		chatW = 20
-	}
 	m.input.SetWidth(m.width - 6)
-	inputH := m.input.Height() + 2
-	statusH := 1
-	m.chat.Width = chatW
-	m.chat.Height = m.height - inputH - statusH - 4
+	m.approvalHeight = 0
+	if m.pendingApproval != nil {
+		m.approvalHeight = lipgloss.Height(m.renderApprovalPanel())
+	}
+	m.chat.Width = m.chatBoxWidth() - styleChatBorder.GetHorizontalPadding()
+	m.chat.Height = m.mainHeight() - 2
 	m.renderChat()
 }
 
-// renderStatus produces the single-line "status bar" between the chat
-// viewport and the input box. While a turn is in flight it shows an
+// relayoutIfSized relayouts once the first WindowSizeMsg has given the screen
+// a size; before that there is nothing to lay out.
+func (m *Model) relayoutIfSized() {
+	if m.width > 0 {
+		m.relayout()
+	}
+}
+
+// renderStatus produces the single-line "status bar" under the chat
+// viewport. While a turn is in flight it shows an
 // animated indicator ("● streaming response.", "..", "...", cycling) and the
-// key that stops the turn. When idle the line is blank — the row is always
-// reserved so layout doesn't shift as the agent transitions in and out of busy.
+// key that stops the turn, or, while a call waits on the approval panel, that
+// the turn is waiting on the operator rather than on the model. When idle the
+// line is blank — the row is always reserved so layout doesn't shift as the
+// agent transitions in and out of busy.
 func (m *Model) renderStatus(width int) string {
+	if m.pendingApproval != nil {
+		line := "● waiting for your approval of the call below"
+		if pad := width - lipgloss.Width(line); pad > 0 {
+			line += strings.Repeat(" ", pad)
+		}
+		return styleWarn.Render(line)
+	}
 	if !m.busy {
 		return strings.Repeat(" ", width)
 	}
@@ -1325,37 +1354,4 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
-}
-
-// overlayCenter draws overlay centered on top of base. BubbleTea has no real
-// compositing, so we render base, then splice the modal lines into the middle.
-func overlayCenter(base, overlay string, w, h int) string {
-	baseLines := strings.Split(base, "\n")
-	overlayLines := strings.Split(overlay, "\n")
-	ow := lipgloss.Width(overlay)
-	oh := len(overlayLines)
-	top := (h - oh) / 2
-	if top < 0 {
-		top = 0
-	}
-	left := (w - ow) / 2
-	if left < 0 {
-		left = 0
-	}
-	for i, ol := range overlayLines {
-		y := top + i
-		if y >= len(baseLines) {
-			break
-		}
-		// Pad/truncate the base line to width w, then splice in the overlay line.
-		baseLine := baseLines[y]
-		// strip ANSI for width math is non-trivial; we just append on the right
-		// when the line is shorter than left. This is a best-effort overlay.
-		if lipgloss.Width(baseLine) < left {
-			baseLines[y] = baseLine + strings.Repeat(" ", left-lipgloss.Width(baseLine)) + ol
-		} else {
-			baseLines[y] = ol
-		}
-	}
-	return strings.Join(baseLines, "\n")
 }

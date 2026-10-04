@@ -55,5 +55,5 @@ var (
 			Background(colorBG).
 			Border(lipgloss.DoubleBorder()).
 			BorderForeground(colorWarn).
-			Padding(1, 2)
+			Padding(0, 1)
 )

@@ -355,7 +355,10 @@ From `internal/config/config.go`:
 ### Approvals
 
 With `safety.approval_required: true`, every restricted tool call (`shell_exec`,
-`file_write`, `browser_eval`, and script tools) waits in a modal for an answer:
+`file_write`, `browser_eval`, and script tools) waits for an answer in a panel
+docked above the input. The conversation stays in view above it and can still be
+scrolled (`pgup`/`pgdn`, `ctrl+home`/`ctrl+end`, the wheel) and its tool calls
+expanded (click, `ctrl+o`, `alt+↑/↓`) while the call waits.
 
 | Key | Effect |
 | --- | --- |
@@ -364,6 +367,10 @@ With `safety.approval_required: true`, every restricted tool call (`shell_exec`,
 | `A` | run this call, and stop asking about any tool for the rest of the session |
 | `n` | refuse this call; the model is told and may try something else |
 | `q` / `esc` | refuse this call and end the turn |
+| `c` (or click the panel title) | hide or show the call's arguments |
+| `↑`/`↓`, `shift+↑`/`shift+↓`, `home`/`end`, wheel over the panel | scroll the arguments |
+
+The panel takes at most half the screen; longer arguments scroll inside it.
 
 The sidebar's *Approval* section shows what currently runs without asking.
 Allowances last until the session ends: `/new` and `/resume` start asking again.

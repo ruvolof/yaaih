@@ -8,7 +8,11 @@ import (
 	"strings"
 	"unicode"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/ruvolof/yaaih/internal/agent"
 )
 
 // approvalField is one top-level argument of a tool call, prepared for review.
@@ -60,7 +64,7 @@ func argumentText(raw json.RawMessage) string {
 // revealHidden makes characters that would act on the terminal, or render as
 // nothing, show up as escapes. Decoded arguments are model output: a carriage
 // return, an ANSI sequence or a bidi override in a command could otherwise
-// redraw the modal and make the operator approve something other than what
+// redraw the panel and make the operator approve something other than what
 // they read.
 func revealHidden(text string) string {
 	var revealed strings.Builder
@@ -112,16 +116,21 @@ func approvalBodyLines(fields []approvalField, width int) []string {
 	return lines
 }
 
-// approvalWidth is the modal's text width: the screen less a two-column margin
-// each side, the double border and the horizontal padding.
+// approvalWidth is the panel's text width. The panel spans the screen like the
+// input box under it and wraps at the same width.
 func (m *Model) approvalWidth() int {
-	return max(m.width-10, 20)
+	return max(m.width-6, 20)
 }
 
-// approvalBodyHeight is how many argument lines fit: the screen less a one-row
-// margin, the border, the padding and the eight rows of header and key hints.
+// approvalBodyHeight is how many argument lines the panel shows at once. The
+// whole panel takes at most half the screen, so the conversation that led up
+// to the call stays in view above it; what is left after the border, the
+// title, the scroll hint and the key hints goes to the arguments.
 func (m *Model) approvalBodyHeight() int {
-	return max(m.height-14, 3)
+	width := m.approvalWidth()
+	chrome := styleApproval.GetVerticalFrameSize() + lipgloss.Height(m.approvalTitle(width)) + 1 +
+		lipgloss.Height(m.approvalKeyHints(width))
+	return max(m.height/2-chrome, 3)
 }
 
 func (m *Model) approvalMaxScroll() int {
@@ -133,26 +142,148 @@ func (m *Model) scrollApproval(delta int) {
 	m.approvalScroll = min(max(m.approvalScroll+delta, 0), m.approvalMaxScroll())
 }
 
-func (m *Model) renderApproval() string {
+// openApproval docks the panel for request above the input. Every request
+// starts with its arguments shown: hiding the previous call's script must not
+// hide this one's.
+func (m *Model) openApproval(request *agent.ApprovalRequest) {
+	m.pendingApproval = request
+	m.approvalFields = parseApprovalArgs(request.Args)
+	m.approvalScroll = 0
+	m.approvalCollapsed = false
+	m.relayoutIfSized()
+}
+
+func (m *Model) closeApproval() {
+	m.pendingApproval = nil
+	m.approvalFields = nil
+	m.relayoutIfSized()
+}
+
+func (m *Model) toggleApprovalArgs() {
+	m.approvalCollapsed = !m.approvalCollapsed
+	m.relayoutIfSized()
+}
+
+// handleApprovalKey answers or navigates the pending request, reporting
+// whether key was one of the panel's.
+func (m *Model) handleApprovalKey(key string) bool {
 	request := m.pendingApproval
+	switch key {
+	case "y", "Y":
+		request.Approve()
+		m.closeApproval()
+	case "a":
+		request.ApproveTool()
+		m.closeApproval()
+	case "A":
+		request.ApproveAll()
+		m.closeApproval()
+	case "n", "N":
+		// Deny this call but let the agent keep iterating — the model may
+		// try a different tool or approach.
+		request.Deny()
+		m.closeApproval()
+	case "q", "Q", "esc":
+		// Cancel the entire turn — break the model out of whatever loop it is
+		// in and return control to the operator.
+		request.Cancel()
+		m.closeApproval()
+	case "c", "C":
+		m.toggleApprovalArgs()
+	case "up", "k":
+		m.scrollApproval(-1)
+	case "down", "j":
+		m.scrollApproval(1)
+	case "shift+up":
+		m.scrollApproval(-m.approvalBodyHeight())
+	case "shift+down":
+		m.scrollApproval(m.approvalBodyHeight())
+	case "home", "g":
+		m.approvalScroll = 0
+	case "end", "G":
+		m.approvalScroll = m.approvalMaxScroll()
+	default:
+		return false
+	}
+	return true
+}
+
+// keysBesideApproval are the keys that keep working while a request waits:
+// the ones for reading the conversation that led to it, copying, and quitting.
+// Everything else is held back, so a keystroke meant for the panel never lands
+// in the input box or sends a message.
+var keysBesideApproval = map[string]bool{
+	"ctrl+c": true, "ctrl+d": true,
+	"ctrl+y": true, "ctrl+t": true,
+	"ctrl+o": true, "alt+up": true, "alt+down": true,
+	"pgup": true, "pgdown": true, "ctrl+home": true, "ctrl+end": true,
+}
+
+// approvalPanelTop is the screen row of the panel's top border; the panel sits
+// directly above the input box.
+func (m *Model) approvalPanelTop() int {
+	return m.height - (m.input.Height() + 2) - m.approvalHeight
+}
+
+// handleApprovalMouse scrolls the panel under the wheel and collapses or
+// expands it on a click on its title, reporting whether the event was over the
+// panel. Events anywhere else go on to the conversation.
+func (m *Model) handleApprovalMouse(msg tea.MouseMsg) bool {
+	top := m.approvalPanelTop()
+	if msg.Y < top || msg.Y >= top+m.approvalHeight {
+		return false
+	}
+	switch {
+	case msg.Button == tea.MouseButtonWheelUp:
+		m.scrollApproval(-3)
+	case msg.Button == tea.MouseButtonWheelDown:
+		m.scrollApproval(3)
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft &&
+		msg.Y == top+styleApproval.GetBorderTopSize():
+		m.toggleApprovalArgs()
+	}
+	return true
+}
+
+func (m *Model) approvalTitle(width int) string {
+	return ansi.Wrap(styleWarn.Render("⚠ Approval required")+styleMuted.Render(" · ")+
+		styleAccent(revealHidden(m.pendingApproval.ToolName)), width, "")
+}
+
+func (m *Model) approvalKeyHints(width int) string {
+	toggle := "[c] hide args"
+	if m.approvalCollapsed {
+		toggle = "[c] show args"
+	}
+	answers := styleMuted.Render("[y] approve   [n] deny   [q/esc] cancel turn   " + toggle)
+	standing := styleMuted.Render(fmt.Sprintf("[a] always allow %s   [A] allow all tools   (this session)",
+		revealHidden(m.pendingApproval.ToolName)))
+	return ansi.Wrap(answers, width, "") + "\n" + ansi.Wrap(standing, width, "")
+}
+
+// renderApproval is the panel's content: the call, as much of its arguments as
+// fits, and the keys that answer it.
+func (m *Model) renderApproval() string {
 	width := m.approvalWidth()
 	lines := approvalBodyLines(m.approvalFields, width)
-	height := m.approvalBodyHeight()
-	first := min(m.approvalScroll, max(len(lines)-height, 0))
-	last := min(first+height, len(lines))
-
-	argsHeader := "Args:"
-	if len(lines) > height {
-		argsHeader += " " + styleWarn.Render(fmt.Sprintf(
-			"lines %d–%d of %d · ↑/↓ pgup/pgdn home/end to scroll", first+1, last, len(lines)))
+	sections := []string{m.approvalTitle(width)}
+	if m.approvalCollapsed {
+		sections = append(sections, styleMuted.Render(ansi.Truncate(
+			fmt.Sprintf("arguments hidden (%d lines)", len(lines)), width, "…")))
+	} else {
+		height := m.approvalBodyHeight()
+		first := min(m.approvalScroll, max(len(lines)-height, 0))
+		last := min(first+height, len(lines))
+		sections = append(sections, lines[first:last]...)
+		if len(lines) > height {
+			sections = append(sections, styleWarn.Render(ansi.Truncate(fmt.Sprintf(
+				"lines %d–%d of %d · ↑/↓ shift+↑/↓ home/end or wheel to scroll", first+1, last, len(lines)), width, "…")))
+		}
 	}
-	return fmt.Sprintf(
-		"%s\n\nTool: %s\n\n%s\n%s\n\n%s\n%s",
-		styleHeader.Render("Approval required"),
-		styleAccent(revealHidden(request.ToolName)),
-		ansi.Wrap(argsHeader, width, ""),
-		strings.Join(lines[first:last], "\n"),
-		ansi.Wrap(styleMuted.Render("[y] approve   [n] deny   [q/esc] cancel turn"), width, ""),
-		ansi.Wrap(styleMuted.Render(fmt.Sprintf("[a] always allow %s   [A] allow all tools   (this session)", revealHidden(request.ToolName))), width, ""),
-	)
+	sections = append(sections, m.approvalKeyHints(width))
+	return strings.Join(sections, "\n")
+}
+
+func (m *Model) renderApprovalPanel() string {
+	return styleApproval.Width(m.width - 2).Render(m.renderApproval())
 }
