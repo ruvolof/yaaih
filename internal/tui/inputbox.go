@@ -7,10 +7,14 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // maxInputRows is how tall the input box grows before its content scrolls.
 const maxInputRows = 8
+
+// inputPromptWidth is the cells the "> " prompt takes in front of every row.
+const inputPromptWidth = 2
 
 const inputPlaceholder = "Type your message... (Enter sends, Alt+Enter or Ctrl+J adds a line, Tab completes /commands)"
 
@@ -43,7 +47,7 @@ func newInputArea() textarea.Model {
 	area.CharLimit = 0
 	area.MaxHeight = 0
 	area.MaxWidth = 0
-	area.SetPromptFunc(2, func(row int) string {
+	area.SetPromptFunc(inputPromptWidth, func(row int) string {
 		if row == 0 {
 			return "> "
 		}
@@ -107,6 +111,40 @@ func (box *inputBox) contentRows(limit int) int {
 		}
 	}
 	return rows
+}
+
+// rows is the box's text as it shows, a row at a time without styling or the
+// padding after it, with the prompt as each row's gutter. Which rows only
+// carry on the line above is known while the whole content fits; once it
+// scrolls, the rows it shows cannot be matched to lines, and copy as they are.
+func (box *inputBox) rows() ([]string, []lineInfo) {
+	drawn := strings.Split(box.View(), "\n")
+	rows := make([]string, len(drawn))
+	info := make([]lineInfo, len(drawn))
+	for index, row := range drawn {
+		rows[index] = strings.TrimRight(ansi.Strip(row), " ")
+		info[index].gutter = inputPromptWidth
+	}
+	if box.overflowed {
+		return rows, info
+	}
+	row := 0
+	for _, line := range strings.Split(box.area.Value(), "\n") {
+		box.measure.SetValue(line)
+		count := box.measure.LineInfo().Height
+		if row+count > len(rows) {
+			break
+		}
+		pieces := make([]string, count)
+		for index := range pieces {
+			pieces[index] = ansi.Cut(rows[row+index], inputPromptWidth, ansi.StringWidth(rows[row+index]))
+		}
+		for index, breakInfo := range breaksIn(line, pieces) {
+			info[row+index].continues, info[row+index].joiner = breakInfo.continues, breakInfo.joiner
+		}
+		row += count
+	}
+	return rows, info
 }
 
 // scrollToTop brings the textarea's first row back into view, keeping the

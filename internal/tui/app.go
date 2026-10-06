@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -30,6 +31,9 @@ var log = logging.For("tui")
 // reset, etc.). Used to strip styling when copying text to the clipboard so
 // the receiving app gets plain text.
 var ansiCSI = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+
+// writeClipboard puts text on the system clipboard.
+var writeClipboard = clipboard.WriteAll
 
 // toastTTL is how long a "copied!" hint lingers in the sidebar before clearing.
 const toastTTL = 2 * time.Second
@@ -88,6 +92,13 @@ type Model struct {
 	// false when the viewport returns to bottom (Ctrl+End, PgDn to bottom,
 	// or wheel-down to bottom) or when the user sends a new message.
 	userScrolled bool
+
+	// selection is the text the operator has dragged over, or nil. dragging
+	// is true from the press that starts a drag to its release; a chat view
+	// does not follow new content in between, so the text does not slide
+	// under the pointer.
+	selection *textSelection
+	dragging  bool
 
 	// busy is true while a turn is in flight (between the user pressing
 	// Enter and the AssistantDoneMsg that ends it). busyFrame advances every
@@ -318,6 +329,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.scheduleReplyRendering())
 
 	case tea.MouseMsg:
+		if handled, cmd := m.dragSelection(msg); handled {
+			return m, cmd
+		}
 		if m.pendingApproval != nil && m.handleApprovalMouse(msg) {
 			return m, nil
 		}
@@ -331,9 +345,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			if entry := m.toolAt(msg.X, msg.Y); entry != nil {
-				m.toggleTool(entry)
-			}
+			m.startSelection(msg.X, msg.Y)
 			return m, nil
 		}
 		// Forward the rest to the chat viewport, which only acts on the wheel.
@@ -341,7 +353,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// it.
 		var cmd tea.Cmd
 		m.chat, cmd = m.chat.Update(msg)
-		m.userScrolled = !m.chat.AtBottom()
+		m.userScrolled = !m.chat.AtBottom() || m.dragging
 		cmds = append(cmds, cmd)
 
 	case tea.KeyMsg:
@@ -349,6 +361,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.handleApprovalKey(msg.String()) || !keysBesideApproval[msg.String()] {
 				return m, nil
 			}
+		}
+		if !keysKeepingSelection[msg.String()] {
+			m.selection = nil
 		}
 		switch msg.String() {
 		case "ctrl+c", "ctrl+d":
@@ -366,7 +381,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Batch(cmds...)
 		case "ctrl+y":
-			cmds = append(cmds, m.copyLastReply())
+			if m.selection != nil && m.selection.moved {
+				cmds = append(cmds, m.copySelection())
+			} else {
+				cmds = append(cmds, m.copyLastReply())
+			}
 			return m, tea.Batch(cmds...)
 		case "ctrl+t":
 			cmds = append(cmds, m.copyTranscript())
@@ -600,7 +619,7 @@ func (m *Model) View() string {
 	chatBox := styleChatBorder.
 		Width(m.chatBoxWidth()).
 		Height(mainH).
-		Render(m.chat.View())
+		Render(m.chatView())
 
 	sidebar := styleSidebarBorder.
 		Width(sidebarW).
@@ -613,7 +632,7 @@ func (m *Model) View() string {
 
 	inputBox := styleInputBorder.
 		Width(m.width - 2).
-		Render(m.input.View())
+		Render(m.inputView())
 
 	rows := []string{main, statusLine}
 	if m.pendingApproval != nil {
@@ -683,6 +702,12 @@ func (m *Model) overSidebar(x, y int) bool {
 // renderChat when it notices the width has changed.
 func (m *Model) relayout() {
 	m.input.SetWidth(m.width - 6)
+	// The chat drops a selection itself when its text moves; the approval
+	// panel and the input box are laid out again from scratch.
+	if m.selection != nil && m.selection.pane != chatPane {
+		m.selection = nil
+		m.dragging = false
+	}
 	m.approvalHeight = 0
 	if m.pendingApproval != nil {
 		m.approvalHeight = lipgloss.Height(m.renderApprovalPanel())
@@ -730,18 +755,13 @@ func (m *Model) renderStatus(width int) string {
 }
 
 // copyLastReply copies the most recent completed assistant turn to the
-// system clipboard, plain text. Returns a tea.Cmd that schedules clearing
-// the toast.
+// system clipboard, as the Markdown the model wrote. Returns a tea.Cmd that
+// schedules clearing the toast.
 func (m *Model) copyLastReply() tea.Cmd {
 	if m.lastAssistant == "" {
 		return m.setToast("no assistant reply to copy yet")
 	}
-	if err := clipboard.WriteAll(m.lastAssistant); err != nil {
-		log.Warn("clipboard write failed", "err", err)
-		return m.setToast(fmt.Sprintf("clipboard error: %v", err))
-	}
-	log.Info("copied last reply", "chars", len(m.lastAssistant))
-	return m.setToast(fmt.Sprintf("copied last reply (%d chars)", len(m.lastAssistant)))
+	return m.copyToClipboard("last reply", m.lastAssistant)
 }
 
 // copyTranscript copies the whole conversation to the clipboard as plain text,
@@ -751,12 +771,17 @@ func (m *Model) copyTranscript() tea.Cmd {
 	if body == "" {
 		return m.setToast("nothing to copy yet")
 	}
-	if err := clipboard.WriteAll(body); err != nil {
+	return m.copyToClipboard("transcript", body)
+}
+
+func (m *Model) copyToClipboard(what, text string) tea.Cmd {
+	if err := writeClipboard(text); err != nil {
 		log.Warn("clipboard write failed", "err", err)
 		return m.setToast(fmt.Sprintf("clipboard error: %v", err))
 	}
-	log.Info("copied transcript", "chars", len(body))
-	return m.setToast(fmt.Sprintf("copied transcript (%d chars)", len(body)))
+	chars := utf8.RuneCountInString(text)
+	log.Info("copied "+what, "chars", chars)
+	return m.setToast(fmt.Sprintf("copied %s (%d chars)", what, chars))
 }
 
 // setToast records a short status hint and returns a tea.Cmd that fires a
@@ -1026,15 +1051,26 @@ func (m *Model) scrollToEntry(entry *chatEntry) {
 	m.userScrolled = !m.chat.AtBottom()
 }
 
-// toolAt returns the tool call drawn at screen cell (x, y), or nil. The chat
-// box is the first thing in the layout, so its content starts just inside its
-// border and padding.
+// chatContentOrigin is the screen cell the chat's first visible line starts
+// at. The chat box is the first thing in the layout, so its content starts
+// just inside its border and padding.
+func chatContentOrigin() (left, top int) {
+	return styleChatBorder.GetBorderLeftSize() + styleChatBorder.GetPaddingLeft(),
+		styleChatBorder.GetBorderTopSize() + styleChatBorder.GetPaddingTop()
+}
+
+// overChatText reports whether screen cell (x, y) is inside the chat viewport.
+func (m *Model) overChatText(x, y int) bool {
+	left, top := chatContentOrigin()
+	return x >= left && x < left+m.chat.Width && y >= top && y < top+m.chat.Height
+}
+
+// toolAt returns the tool call drawn at screen cell (x, y), or nil.
 func (m *Model) toolAt(x, y int) *chatEntry {
-	left := styleChatBorder.GetBorderLeftSize() + styleChatBorder.GetPaddingLeft()
-	top := styleChatBorder.GetBorderTopSize() + styleChatBorder.GetPaddingTop()
-	if x < left || x >= left+m.chat.Width || y < top || y >= top+m.chat.Height {
+	if !m.overChatText(x, y) {
 		return nil
 	}
+	_, top := chatContentOrigin()
 	entry := m.transcript.entryAtLine(y - top + m.chat.YOffset)
 	if entry == nil || entry.tool == nil {
 		return nil
@@ -1066,7 +1102,7 @@ func (m *Model) renderChatKeeping(reading *chatEntry, offset int) {
 	// wide-cell characters.
 	body := m.transcript.body.String()
 	if m.pendingAs.Len() > 0 {
-		pending := ansi.Wrap(styleAssist.Render(m.pendingAs.String()), width, "")
+		pending := m.pendingLayout(width)
 		if body != "" {
 			body = body + "\n" + pending
 		} else {
@@ -1079,6 +1115,10 @@ func (m *Model) renderChatKeeping(reading *chatEntry, offset int) {
 		m.chat.GotoBottom()
 	case reading != nil:
 		m.chat.SetYOffset(m.viewTop(reading, offset))
+	}
+	if line, changed := m.transcript.takeChange(); changed && m.selection != nil &&
+		m.selection.pane == chatPane && m.selection.reaches(line) {
+		m.selection = nil
 	}
 }
 
@@ -1193,7 +1233,8 @@ func (m *Model) renderSidebar() string {
 		fmt.Fprintln(&b, styleOK.Render(truncate(m.toast, 26)))
 	}
 	fmt.Fprintln(&b, styleMuted.Render("↑/↓ history  tab complete"))
-	fmt.Fprintln(&b, styleMuted.Render("^y copy reply"))
+	fmt.Fprintln(&b, styleMuted.Render("drag  select text"))
+	fmt.Fprintln(&b, styleMuted.Render("^y copy selection/reply"))
 	fmt.Fprintln(&b, styleMuted.Render("^t copy chat"))
 	fmt.Fprintln(&b, styleMuted.Render("^o/click expand tool"))
 	fmt.Fprintln(&b, styleMuted.Render("alt+↑/↓ select tool"))
@@ -1348,10 +1389,11 @@ func styleAccent(s string) string {
 	return lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render(s)
 }
 
+// truncate fits s on one line of n cells, then the ellipsis.
 func truncate(s string, n int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= n {
+	if ansi.StringWidth(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return ansi.Truncate(s, n, "") + "…"
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -93,27 +94,32 @@ func escapeRune(character rune) string {
 // approvalBodyLines lays the fields out at the given width. Every line of a
 // value is numbered and long lines are wrapped exactly, keeping every space,
 // onto unnumbered continuation rows: in a shell command a line break separates
-// commands, so a wrap must never be mistaken for one.
-func approvalBodyLines(fields []approvalField, width int) []string {
-	var lines []string
+// commands, so a wrap must never be mistaken for one. The numbers are a gutter
+// in info, and the continuation rows join back onto their line when copied.
+func approvalBodyLines(fields []approvalField, width int) (lines []string, info []lineInfo) {
 	for _, field := range fields {
 		if field.name != "" {
 			lines = append(lines, styleTool.Render(field.name))
+			info = append(info, lineInfo{})
 		}
 		valueLines := strings.Split(field.value, "\n")
 		numberWidth := len(strconv.Itoa(len(valueLines)))
 		textWidth := max(width-numberWidth-3, 10)
 		for index, valueLine := range valueLines {
-			for row, segment := range strings.Split(ansi.Hardwrap(valueLine, textWidth, true), "\n") {
+			segments := strings.Split(ansi.Hardwrap(valueLine, textWidth, true), "\n")
+			segmentInfo := breaksIn(valueLine, segments)
+			for row, segment := range segments {
 				number := ""
 				if row == 0 {
 					number = strconv.Itoa(index + 1)
 				}
 				lines = append(lines, styleMuted.Render(fmt.Sprintf("%*s │ ", numberWidth, number))+segment)
+				segmentInfo[row].gutter = numberWidth + 3
 			}
+			info = append(info, segmentInfo...)
 		}
 	}
-	return lines
+	return lines, info
 }
 
 // approvalWidth is the panel's text width. The panel spans the screen like the
@@ -134,8 +140,36 @@ func (m *Model) approvalBodyHeight() int {
 }
 
 func (m *Model) approvalMaxScroll() int {
-	lines := approvalBodyLines(m.approvalFields, m.approvalWidth())
+	lines, _ := approvalBodyLines(m.approvalFields, m.approvalWidth())
 	return max(len(lines)-m.approvalBodyHeight(), 0)
+}
+
+// approvalWindow is the argument lines [first, last) the panel shows, of
+// count.
+func (m *Model) approvalWindow(count int) (first, last int) {
+	height := m.approvalBodyHeight()
+	first = min(m.approvalScroll, max(count-height, 0))
+	return first, min(first+height, count)
+}
+
+// approvalBodyArea is where the panel's arguments are on screen, when it is
+// showing them.
+func (m *Model) approvalBodyArea() (paneArea, bool) {
+	if m.pendingApproval == nil || m.approvalCollapsed || m.width == 0 {
+		return paneArea{}, false
+	}
+	width := m.approvalWidth()
+	lines, _ := approvalBodyLines(m.approvalFields, width)
+	first, last := m.approvalWindow(len(lines))
+	area := paneArea{
+		left:      styleApproval.GetBorderLeftSize() + styleApproval.GetPaddingLeft(),
+		top:       m.approvalPanelTop() + styleApproval.GetBorderTopSize() + lipgloss.Height(m.approvalTitle(width)),
+		width:     width,
+		height:    last - first,
+		offset:    first,
+		lineCount: len(lines),
+	}
+	return area, area.height > 0
 }
 
 func (m *Model) scrollApproval(delta int) {
@@ -225,9 +259,10 @@ func (m *Model) approvalPanelTop() int {
 	return m.height - (m.input.Height() + 2) - m.approvalHeight
 }
 
-// handleApprovalMouse scrolls the panel under the wheel and collapses or
-// expands it on a click on its title, reporting whether the event was over the
-// panel. Events anywhere else go on to the conversation.
+// handleApprovalMouse scrolls the panel under the wheel, collapses or expands
+// it on a click on its title, and starts selecting its arguments on a press
+// on them, reporting whether the event was over the panel. Events anywhere
+// else go on to the conversation.
 func (m *Model) handleApprovalMouse(msg tea.MouseMsg) bool {
 	top := m.approvalPanelTop()
 	if msg.Y < top || msg.Y >= top+m.approvalHeight {
@@ -241,6 +276,8 @@ func (m *Model) handleApprovalMouse(msg tea.MouseMsg) bool {
 	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft &&
 		msg.Y == top+styleApproval.GetBorderTopSize():
 		m.toggleApprovalArgs()
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
+		m.startSelection(msg.X, msg.Y)
 	}
 	return true
 }
@@ -265,17 +302,17 @@ func (m *Model) approvalKeyHints(width int) string {
 // fits, and the keys that answer it.
 func (m *Model) renderApproval() string {
 	width := m.approvalWidth()
-	lines := approvalBodyLines(m.approvalFields, width)
+	lines, info := approvalBodyLines(m.approvalFields, width)
 	sections := []string{m.approvalTitle(width)}
 	if m.approvalCollapsed {
 		sections = append(sections, styleMuted.Render(ansi.Truncate(
 			fmt.Sprintf("arguments hidden (%d lines)", len(lines)), width, "…")))
 	} else {
-		height := m.approvalBodyHeight()
-		first := min(m.approvalScroll, max(len(lines)-height, 0))
-		last := min(first+height, len(lines))
-		sections = append(sections, lines[first:last]...)
-		if len(lines) > height {
+		first, last := m.approvalWindow(len(lines))
+		visible := slices.Clone(lines[first:last])
+		m.highlightPane(approvalPane, visible, info[first:last], first)
+		sections = append(sections, visible...)
+		if len(lines) > m.approvalBodyHeight() {
 			sections = append(sections, styleWarn.Render(ansi.Truncate(fmt.Sprintf(
 				"lines %d–%d of %d · ↑/↓ shift+↑/↓ home/end or wheel to scroll", first+1, last, len(lines)), width, "…")))
 		}

@@ -178,10 +178,11 @@ func run(agentsRoot, initialAgent, resumeID string, newSession bool, overrides c
 
 		log.Info("starting TUI event loop", "agent", current)
 		model := tui.New(rootCtx, cfg, ag, runner, agentsRoot, current, inputHistory)
-		// WithMouseCellMotion delivers the wheel and clicks to the TUI. This
-		// means the terminal no longer handles native click-drag selection in
-		// the app window — that's why we expose the clipboard via ctrl+y /
-		// ctrl+t hotkeys instead.
+		// WithMouseCellMotion delivers the wheel, clicks and drags to the TUI.
+		// The terminal's own click-drag selection would take in the sidebar
+		// and the borders, so the TUI selects text within the chat itself and
+		// copies it with ctrl+y; Shift+drag still reaches the terminal's
+		// selection in most terminals.
 		p := tea.NewProgram(model,
 			tea.WithAltScreen(),
 			tea.WithContext(rootCtx),

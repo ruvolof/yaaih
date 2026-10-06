@@ -57,7 +57,8 @@ func TestApprovalRevealsCharactersThatActOnTheTerminal(t *testing.T) {
 func TestApprovalBodyMarksWrappedRowsApartFromLineBreaks(t *testing.T) {
 	fields := []approvalField{{name: "command", value: strings.Repeat("x", 25) + "\necho done"}}
 	var lines []string
-	for _, line := range approvalBodyLines(fields, 14) {
+	bodyLines, _ := approvalBodyLines(fields, 14)
+	for _, line := range bodyLines {
 		lines = append(lines, stripANSI(line))
 	}
 	want := []string{
@@ -212,12 +213,7 @@ func TestTheConversationStaysScrollableAndClickableWhileAnApprovalWaits(t *testi
 	requestApproval(t, m, gate, longScript())
 	call := lastToolEntry(m)
 
-	chatTop := styleChatBorder.GetBorderTopSize()
-	chatLeft := styleChatBorder.GetBorderLeftSize() + styleChatBorder.GetPaddingLeft()
-	m.Update(tea.MouseMsg{
-		X: chatLeft + 1, Y: chatTop + call.firstLine - m.chat.YOffset,
-		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft,
-	})
+	clickChat(m, selectionPoint{line: call.firstLine, column: 1})
 	if !call.expanded {
 		t.Error("clicking a call in the conversation did not expand it")
 	}
@@ -232,6 +228,7 @@ func TestTheConversationStaysScrollableAndClickableWhileAnApprovalWaits(t *testi
 		t.Error("ctrl+end did not return the conversation to the bottom")
 	}
 
+	chatLeft, chatTop := chatContentOrigin()
 	m.Update(tea.MouseMsg{X: chatLeft + 1, Y: chatTop + 1, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp})
 	if m.chat.YOffset >= bottom || m.approvalScroll != 0 {
 		t.Error("the wheel over the conversation did not scroll it alone")

@@ -18,9 +18,10 @@ type markdownRenderer struct {
 	renderer *glamour.TermRenderer
 }
 
-// render draws source at width. A reply glamour cannot render is shown as the
-// plain text it was streamed as.
-func (md *markdownRenderer) render(source string, width int) string {
+// render draws source at width, with what copying needs to know about the
+// lines it drew. A reply glamour cannot render is shown as the plain text it
+// was streamed as.
+func (md *markdownRenderer) render(source string, width int) (string, []lineInfo) {
 	if md.renderer == nil || md.width != width {
 		renderer, err := glamour.NewTermRenderer(
 			glamour.WithStyles(replyStyle()),
@@ -40,12 +41,24 @@ func (md *markdownRenderer) render(source string, width int) string {
 		return plainReply(source, width)
 	}
 	// Glamour wraps only between words, so a token longer than the width — a
-	// path, a URL, a line of code — would overrun the viewport.
-	return ansi.Hardwrap(trimRendered(rendered), width, true)
+	// path, a URL, a line of code — would overrun the viewport. Glamour's own
+	// breaks between words are not known here, and copy as line breaks.
+	lines, info := wrapEach(trimRendered(rendered), func(line string) string {
+		return ansi.Hardwrap(line, width, true)
+	})
+	return strings.Join(lines, "\n"), info
 }
 
-func plainReply(source string, width int) string {
-	return ansi.Wrap(styleAssist.Render(source), width, "")
+func plainReply(source string, width int) (string, []lineInfo) {
+	return wrapText(styleAssist.Render(source), width)
+}
+
+// wrapText word-wraps text at width, keeping track of the breaks it makes.
+func wrapText(text string, width int) (string, []lineInfo) {
+	lines, info := wrapEach(text, func(line string) string {
+		return ansi.Wrap(line, width, "")
+	})
+	return strings.Join(lines, "\n"), info
 }
 
 // replyStyle is glamour's Tokyo Night style, which shares the app's palette,

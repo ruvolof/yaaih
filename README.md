@@ -182,8 +182,24 @@ worked from.
   **Enter** on an empty input box toggles the selection. Alt+↓ past the newest
   call clears it, and so does sending a message.
 
-**Ctrl+T** copies the whole conversation with every call expanded, and each
-reply as the Markdown the model wrote rather than as it is drawn.
+### Copying
+
+- **Drag** across the conversation, the arguments in the approval panel, or
+  the text in the input box to select it; dragging past the top or bottom edge
+  of the conversation or the panel scrolls it. **Ctrl+Y** copies the selection
+  as it reads on screen — replies as drawn, after Markdown, without colours.
+  Lines broken only to fit the width are joined back, and the indent and line
+  numbers in front of tool arguments and output are left out. Paragraphs of a
+  reply keep the line breaks they are drawn with. A collapsed tool call copies
+  its one-line preview; expand it first to copy all of it. Any other key, or a
+  click, drops the selection.
+- **Ctrl+Y** with nothing selected copies the last reply, as the Markdown the
+  model wrote.
+- **Ctrl+T** copies the whole conversation with every call expanded, and each
+  reply as the Markdown the model wrote rather than as it is drawn.
+
+**Shift+drag** goes to the terminal's own selection in most terminals, for
+copying anything else on screen.
 
 ### Docker runtime
 

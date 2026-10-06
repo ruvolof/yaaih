@@ -113,14 +113,7 @@ func TestClickingACallTogglesIt(t *testing.T) {
 	runTool(m, "call-1", `{"command":"ls"}`, "a\nb")
 	entry := lastToolEntry(m)
 
-	top := styleChatBorder.GetBorderTopSize()
-	left := styleChatBorder.GetBorderLeftSize() + styleChatBorder.GetPaddingLeft()
-	click := func(line int) {
-		m.Update(tea.MouseMsg{
-			X: left + 1, Y: top + line - m.chat.YOffset,
-			Action: tea.MouseActionPress, Button: tea.MouseButtonLeft,
-		})
-	}
+	click := func(line int) { clickChat(m, selectionPoint{line: line, column: 1}) }
 
 	click(m.transcript.entries[0].firstLine)
 	if entry.expanded {

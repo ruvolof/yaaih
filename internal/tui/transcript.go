@@ -38,6 +38,11 @@ type transcript struct {
 	// selected is the tool call alt+↑/↓ has moved to, or nil.
 	selected *chatEntry
 
+	// changed and changedFrom say which lines may no longer hold the text they
+	// held when takeChange was last called: everything from changedFrom on.
+	changed     bool
+	changedFrom int
+
 	markdown markdownRenderer
 }
 
@@ -53,12 +58,16 @@ type chatEntry struct {
 	// rendered is the reply as glamour drew it at renderedWidth, which is 0
 	// until it has been drawn at all.
 	rendered      string
+	renderedInfo  []lineInfo
 	renderedWidth int
 
-	index     int
-	layout    string
-	firstLine int
-	lineCount int
+	index  int
+	layout string
+	// layoutInfo describes layout's lines for copying; nil when none of them
+	// was broken to fit or has a gutter.
+	layoutInfo []lineInfo
+	firstLine  int
+	lineCount  int
 }
 
 // toolCall is a call and, once it has one, its reply. result is the reply
@@ -91,9 +100,11 @@ func (t *transcript) appendEntry(entry *chatEntry) *chatEntry {
 		if entry.reply != "" {
 			t.renderReply(entry)
 		}
-		entry.layout = t.layOut(entry, t.width)
+		t.layOut(entry, t.width)
 		entry.firstLine = t.lineCount
 		entry.lineCount = strings.Count(entry.layout, "\n") + 1
+		// The new entry takes the lines a reply still streaming in was drawn on.
+		t.noteChange(entry.firstLine)
 		if entry.index > 0 {
 			t.body.WriteString("\n")
 		}
@@ -110,8 +121,9 @@ func (t *transcript) setWidth(width int) {
 		return
 	}
 	t.width = width
+	t.noteChange(0)
 	for _, entry := range t.entries {
-		entry.layout = t.layOut(entry, width)
+		t.layOut(entry, width)
 	}
 	t.rejoin()
 }
@@ -123,7 +135,8 @@ func (t *transcript) refresh(changed ...*chatEntry) {
 	}
 	for _, entry := range changed {
 		if entry != nil {
-			entry.layout = t.layOut(entry, t.width)
+			t.layOut(entry, t.width)
+			t.noteChange(entry.firstLine)
 		}
 	}
 	t.rejoin()
@@ -148,36 +161,85 @@ func (t *transcript) reset() {
 	t.body.Reset()
 	t.lineCount = 0
 	t.selected = nil
+	t.noteChange(0)
 }
 
-func (t *transcript) layOut(entry *chatEntry, width int) string {
-	if entry.tool != nil {
-		return entry.tool.layOut(width, entry.expanded, entry == t.selected)
+func (t *transcript) noteChange(line int) {
+	if !t.changed || line < t.changedFrom {
+		t.changedFrom = line
 	}
-	if entry.reply != "" {
-		return entry.replyLayout(width)
+	t.changed = true
+}
+
+// takeChange reports the first line that may have changed since the last
+// call, if any did.
+func (t *transcript) takeChange() (line int, changed bool) {
+	line, changed = t.changedFrom, t.changed
+	t.changed = false
+	return line, changed
+}
+
+// lines returns the laid-out lines [first, last), read from the entries they
+// belong to, with what copying needs to know about each.
+func (t *transcript) lines(first, last int) ([]string, []lineInfo) {
+	var lines []string
+	var info []lineInfo
+	for line := max(first, 0); line < last; {
+		entry := t.entryAtLine(line)
+		if entry == nil {
+			break
+		}
+		entryLines := strings.Split(entry.layout, "\n")
+		from, to := line-entry.firstLine, min(last-entry.firstLine, len(entryLines))
+		lines = append(lines, entryLines[from:to]...)
+		for index := from; index < to; index++ {
+			info = append(info, infoAt(entry.layoutInfo, index))
+		}
+		line = entry.firstLine + to
 	}
-	return ansi.Wrap(entry.text, width, "")
+	return lines, info
+}
+
+// lineInfo returns what copying needs to know about lines [first, last), as
+// lines does, without reading the lines themselves.
+func (t *transcript) lineInfo(first, last int) []lineInfo {
+	var info []lineInfo
+	for line := max(first, 0); line < min(last, t.lineCount); line++ {
+		entry := t.entryAtLine(line)
+		info = append(info, infoAt(entry.layoutInfo, line-entry.firstLine))
+	}
+	return info
+}
+
+func (t *transcript) layOut(entry *chatEntry, width int) {
+	switch {
+	case entry.tool != nil:
+		entry.layout, entry.layoutInfo = entry.tool.layOut(width, entry.expanded, entry == t.selected)
+	case entry.reply != "":
+		entry.layout, entry.layoutInfo = entry.replyLayout(width)
+	default:
+		entry.layout, entry.layoutInfo = wrapText(entry.text, width)
+	}
 }
 
 // replyLayout is the reply as glamour drew it at width or, until it has been,
 // a stand-in: its last rendering re-wrapped to fit, which is close enough in
 // shape that little moves when the real one replaces it.
-func (entry *chatEntry) replyLayout(width int) string {
+func (entry *chatEntry) replyLayout(width int) (string, []lineInfo) {
 	switch entry.renderedWidth {
 	case width:
-		return entry.rendered
+		return entry.rendered, entry.renderedInfo
 	case 0:
 		return plainReply(entry.reply, width)
 	default:
-		return ansi.Wrap(entry.rendered, width, "")
+		return wrapText(entry.rendered, width)
 	}
 }
 
 func (t *transcript) renderReply(entry *chatEntry) {
-	entry.rendered = t.markdown.render(entry.reply, t.width)
+	entry.rendered, entry.renderedInfo = t.markdown.render(entry.reply, t.width)
 	entry.renderedWidth = t.width
-	entry.layout = entry.rendered
+	entry.layout, entry.layoutInfo = entry.rendered, entry.renderedInfo
 }
 
 func (t *transcript) showsStandIn(entry *chatEntry) bool {
@@ -204,6 +266,7 @@ func (t *transcript) renderReplies(first, last int) bool {
 		onScreen := entry.firstLine < last && entry.firstLine+entry.lineCount > first
 		if onScreen && t.showsStandIn(entry) {
 			t.renderReply(entry)
+			t.noteChange(entry.firstLine)
 			rendered = true
 		}
 	}
@@ -229,6 +292,7 @@ func (t *transcript) renderStaleNear(line int, budget time.Duration) {
 		for _, index := range []int{center + distance, center - distance} {
 			if index >= 0 && index < len(t.entries) && t.showsStandIn(t.entries[index]) {
 				t.renderReply(t.entries[index])
+				t.noteChange(t.entries[index].firstLine)
 				rendered = true
 			}
 		}
@@ -254,7 +318,7 @@ func (t *transcript) plainText() string {
 			text = entry.reply
 		}
 		if entry.tool != nil {
-			text = entry.tool.layOut(unwrappedWidth, true, false)
+			text, _ = entry.tool.layOut(unwrappedWidth, true, false)
 		}
 		plain.WriteString(stripANSI(text))
 	}
@@ -313,8 +377,10 @@ func (t *transcript) toolAfter(index int) *chatEntry {
 const toolResultIndent = "    "
 
 // layOut draws a call collapsed — one line for the call, one for a preview
-// of the reply — or expanded, with every argument and the whole reply.
-func (call *toolCall) layOut(width int, expanded, selected bool) string {
+// of the reply — or expanded, with every argument and the whole reply. The
+// indent and the line numbers in front of the arguments and the reply are
+// gutters, left out when the text is copied.
+func (call *toolCall) layOut(width int, expanded, selected bool) (string, []lineInfo) {
 	marker := "▸"
 	if expanded {
 		marker = "▾"
@@ -329,31 +395,36 @@ func (call *toolCall) layOut(width int, expanded, selected bool) string {
 		if call.answered {
 			lines = append(lines, call.statusLine(" "+truncate(call.replyWithoutErrorPrefix(), 600)))
 		}
-		return ansi.Wrap(strings.Join(lines, "\n"), width, "")
+		return wrapText(strings.Join(lines, "\n"), width)
 	}
 
 	innerWidth := max(width-len(toolResultIndent), 10)
-	lines := []string{ansi.Wrap(heading, width, "")}
-	for _, argumentLine := range approvalBodyLines(parseApprovalArgs(call.args), innerWidth) {
+	lines, info := wrapEach(heading, func(line string) string { return ansi.Wrap(line, width, "") })
+	info = growInfo(info, len(lines))
+	argumentLines, argumentInfo := approvalBodyLines(parseApprovalArgs(call.args), innerWidth)
+	for index, argumentLine := range argumentLines {
 		lines = append(lines, toolResultIndent+argumentLine)
+		argumentInfo[index].gutter += len(toolResultIndent)
 	}
+	info = append(info, argumentInfo...)
 	if !call.answered {
-		return strings.Join(lines, "\n")
+		return strings.Join(lines, "\n"), info
 	}
 
-	reply := revealHidden(call.result)
-	replyLines := strings.Split(strings.TrimSuffix(reply, "\n"), "\n")
-	if reply == "" {
+	reply := strings.TrimSuffix(revealHidden(call.result), "\n")
+	if call.result == "" {
 		lines = append(lines, call.statusLine(" (no output)"))
-		return strings.Join(lines, "\n")
+		return strings.Join(lines, "\n"), append(info, lineInfo{})
 	}
-	lines = append(lines, call.statusLine(fmt.Sprintf(" %d lines", len(replyLines))))
-	for _, replyLine := range replyLines {
-		for _, segment := range strings.Split(ansi.Hardwrap(replyLine, innerWidth, true), "\n") {
-			lines = append(lines, toolResultIndent+styleToolRes.Render(segment))
-		}
+	lines = append(lines, call.statusLine(fmt.Sprintf(" %d lines", strings.Count(reply, "\n")+1)))
+	info = append(info, lineInfo{})
+	segments, segmentInfo := wrapEach(reply, func(line string) string { return ansi.Hardwrap(line, innerWidth, true) })
+	segmentInfo = growInfo(segmentInfo, len(segments))
+	for index, segment := range segments {
+		lines = append(lines, toolResultIndent+styleToolRes.Render(segment))
+		segmentInfo[index].gutter = len(toolResultIndent)
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), append(info, segmentInfo...)
 }
 
 func (call *toolCall) statusLine(detail string) string {
