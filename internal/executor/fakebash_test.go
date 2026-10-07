@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -24,6 +25,11 @@ type fakeBash struct {
 	// failing, standing in for a container that has gone away. Zero never fails.
 	failOpenFrom int
 	openErr      error
+
+	// killed is every process group the executor asked to have killed; killErr,
+	// when set, is what each of those requests fails with.
+	killed  []int
+	killErr error
 }
 
 // bashReply is what the fake does with one command.
@@ -47,6 +53,7 @@ func (f *fakeBash) openBash(ctx context.Context) (*bashProcess, error) {
 	f.opens++
 	failing := f.failOpenFrom > 0 && f.opens >= f.failOpenFrom
 	err := f.openErr
+	pid := fakeShellPID(f.opens)
 	f.mu.Unlock()
 	if failing {
 		return nil, err
@@ -54,7 +61,7 @@ func (f *fakeBash) openBash(ctx context.Context) (*bashProcess, error) {
 
 	stdinR, stdinW := io.Pipe()
 	stdoutR, stdoutW := io.Pipe()
-	go f.run(stdinR, stdoutW)
+	go f.run(stdinR, stdoutW, pid)
 
 	return &bashProcess{
 		stdin:  stdinW,
@@ -67,6 +74,17 @@ func (f *fakeBash) openBash(ctx context.Context) (*bashProcess, error) {
 		},
 	}, nil
 }
+
+func (f *fakeBash) killProcessGroup(ctx context.Context, pgid int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.killed = append(f.killed, pgid)
+	return f.killErr
+}
+
+// fakeShellPID is the pid the fake's nth session reports, distinct per session
+// so a test can tell which one was killed.
+func fakeShellPID(session int) int { return 1000 + session }
 
 // sentinelRequest starts the line writePromptSentinel emits, as bash receives
 // it; the session's marker follows, up to the colon.
@@ -98,7 +116,7 @@ func unwrapCommand(line string) (string, bool) {
 	return string(decoded), true
 }
 
-func (f *fakeBash) run(stdin io.ReadCloser, stdout io.WriteCloser) {
+func (f *fakeBash) run(stdin io.ReadCloser, stdout io.WriteCloser, pid int) {
 	reader := bufio.NewReader(stdin)
 	busy := false
 	for {
@@ -116,6 +134,13 @@ func (f *fakeBash) run(stdin io.ReadCloser, stdout io.WriteCloser) {
 			cwd := f.cwd
 			f.mu.Unlock()
 			if _, err := io.WriteString(stdout, "\n"+promptMarkOf(line)+":"+cwd+"\n"); err != nil {
+				return
+			}
+			continue
+		}
+
+		if line == reportShellPID {
+			if _, err := io.WriteString(stdout, strconv.Itoa(pid)+"\n"); err != nil {
 				return
 			}
 			continue
@@ -152,6 +177,13 @@ func (f *fakeBash) sessionsOpened() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.opens
+}
+
+// killedGroups is every process group the executor asked to have killed.
+func (f *fakeBash) killedGroups() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.killed...)
 }
 
 // executed is every scripted command that actually reached bash.

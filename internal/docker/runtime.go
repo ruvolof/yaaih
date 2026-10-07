@@ -9,6 +9,8 @@
 //   - Starting the session container with the workspace bind-mounted, with
 //     Chromium's remote-debugging port published to the host so the browser
 //     tool (running in-process on the host via playwright-go) can connect via CDP.
+//   - Publishing the ports the agent declares, so servers it starts in the
+//     sandbox are reachable from the host.
 //   - Capping the container's memory, CPU, and process count so a runaway
 //     command is stopped inside the sandbox instead of starving the host.
 //   - Stopping and removing the container on shutdown.
@@ -102,6 +104,7 @@ type Runtime struct {
 	limits      Limits
 	user        string // uid:gid the container runs as; "" leaves the image's user (root)
 	cdpHostPort string // host port the container's CDPPort is published to
+	ports       PublishedPorts
 	owner       owner
 }
 
@@ -133,6 +136,9 @@ type Options struct {
 	// written into the workspace are owned by that user on the host. Ignored
 	// where the daemon already maps container root to the invoking user.
 	RunAsHostUser bool
+	// Ports are published from the container to the host, in the syntax
+	// ParsePorts takes.
+	Ports []string
 	// ProgressWriter receives human-readable progress lines. nil discards them.
 	ProgressWriter io.Writer
 }
@@ -149,6 +155,10 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	}
 	if opts.ProgressWriter == nil {
 		opts.ProgressWriter = io.Discard
+	}
+	ports, err := ParsePorts(opts.Ports)
+	if err != nil {
+		return nil, fmt.Errorf("docker: ports: %w", err)
 	}
 
 	resolveDockerHost(ctx)
@@ -219,6 +229,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		toolsDir:  toolsAbs,
 		limits:    limits,
 		user:      user,
+		ports:     ports,
 		owner:     currentOwner(),
 	}
 
@@ -273,6 +284,9 @@ func (r *Runtime) Start(ctx context.Context) error {
 		_ = r.cli.ContainerRemove(context.Background(), created.ID, container.RemoveOptions{Force: true})
 		r.containerID = ""
 		log.Error("container start failed", "err", err, "container_id", created.ID)
+		if isPortConflict(err) {
+			return fmt.Errorf("docker: start container: %w: %w", errPortTaken, err)
+		}
 		return fmt.Errorf("docker: start container: %w", err)
 	}
 
@@ -291,6 +305,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		"workspace", r.workspace,
 		"tools_dir", r.toolsDir,
 		"cdp_host_port", r.cdpHostPort,
+		"published_ports", r.ports.specs,
 		"memory_bytes", r.limits.MemoryBytes,
 		"cpus", r.limits.CPUs,
 		"pids", r.limits.PIDs,
@@ -306,10 +321,15 @@ func (r *Runtime) Start(ctx context.Context) error {
 const sandboxHome = "/tmp"
 
 // containerSpec is the container the session runs in: the workspace and tools
-// mounts, the CDP port published on loopback, the resource limits, and the
-// user. No-new-privileges stops setuid binaries in the image from handing
-// root back to a container that runs as the host user, and keeps root from
-// gaining capabilities it was not started with.
+// mounts, the CDP port published on loopback alongside the agent's own ports,
+// the resource limits, and the user. No-new-privileges stops setuid binaries in
+// the image from handing root back to a container that runs as the host user,
+// and keeps root from gaining capabilities it was not started with.
+//
+// Docker's init runs as PID 1 in front of `sleep infinity`, which never reaps
+// the orphans it inherits: every process the shell's restart kills, and every
+// detached job that exits, would otherwise stay a zombie and hold a slot of the
+// PID limit until the container goes.
 func (r *Runtime) containerSpec(cdpPort nat.Port) (*container.Config, *container.HostConfig) {
 	mounts := []mount.Mount{{
 		Type:   mount.TypeBind,
@@ -328,14 +348,23 @@ func (r *Runtime) containerSpec(cdpPort nat.Port) (*container.Config, *container
 		})
 	}
 
+	portBindings := nat.PortMap{
+		cdpPort: []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: ""}}, // "" = random free port
+	}
+	exposedPorts := nat.PortSet{cdpPort: struct{}{}}
+	for port, bindings := range r.ports.bindings {
+		portBindings[port] = bindings
+		exposedPorts[port] = struct{}{}
+	}
+
+	reapOrphans := true
 	hostCfg := &container.HostConfig{
-		Mounts: mounts,
-		PortBindings: nat.PortMap{
-			cdpPort: []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: ""}}, // "" = random free port
-		},
-		AutoRemove:  false,
-		Resources:   r.limits.resources(),
-		SecurityOpt: []string{"no-new-privileges"},
+		Init:         &reapOrphans,
+		Mounts:       mounts,
+		PortBindings: portBindings,
+		AutoRemove:   false,
+		Resources:    r.limits.resources(),
+		SecurityOpt:  []string{"no-new-privileges"},
 	}
 	cfg := &container.Config{
 		Image:        r.image,
@@ -346,12 +375,15 @@ func (r *Runtime) containerSpec(cdpPort nat.Port) (*container.Config, *container
 		AttachStdout: false,
 		AttachStderr: false,
 		Cmd:          []string{"sleep", "infinity"},
-		ExposedPorts: nat.PortSet{cdpPort: struct{}{}},
+		ExposedPorts: exposedPorts,
 		Labels:       r.owner.labels(),
 	}
 	cfg.Labels[sessionLabel] = "true"
 	if r.user != "" {
-		cfg.Env = []string{"HOME=" + sandboxHome}
+		cfg.Env = append(cfg.Env, "HOME="+sandboxHome)
+	}
+	if len(r.ports.containerPorts) > 0 {
+		cfg.Env = append(cfg.Env, PublishedPortsEnv+"="+strings.Join(r.ports.containerPorts, ","))
 	}
 	return cfg, hostCfg
 }

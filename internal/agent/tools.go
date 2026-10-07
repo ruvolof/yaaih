@@ -158,8 +158,12 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 				"Execute a shell command in the persistent bash session inside the sandbox container. CWD and env vars persist across calls. "+
 					"Output above %s is cut down before you see it — the first and last part are kept and the full text is written to a file "+
 					"named in the result, which you can then grep. Filtering in the command itself (grep, head, tail, wc) gets you a better "+
-					"answer than reading the cut-down version of an unfiltered one.",
-				toolout.HumanBytes(cfg.Options.MaxToolResultBytes)),
+					"answer than reading the cut-down version of an unfiltered one. "+
+					"A call returns only when the command exits. One still running after %d seconds is killed with everything it started, "+
+					"and the session restarts with CWD and env vars lost. Start anything meant to keep running — a server, a watcher — "+
+					"detached and with its output in a file: `setsid cmd >/tmp/cmd.log 2>&1 &`, then read the log with tail. "+
+					"Without setsid the job is killed at the next timeout; without the redirect its output spills into later results.",
+				toolout.HumanBytes(cfg.Options.MaxToolResultBytes), cfg.Options.CommandTimeout),
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

@@ -240,6 +240,7 @@ func buildAgentRuntime(ctx context.Context, agentDir, resumeID string, newSessio
 		"approval_required", cfg.Safety.ApprovalRequired,
 		"runtime_image", cfg.Runtime.Image,
 		"workspace", cfg.Runtime.Workspace,
+		"ports", cfg.Runtime.Ports,
 		"skills_dir", cfg.SkillsDir,
 		"tools_dir", cfg.ToolsDir,
 		"sessions_dir", cfg.SessionsDir,
@@ -339,6 +340,7 @@ func setupRuntime(ctx context.Context, cfg *config.Config) (executor.Executor, *
 			PIDs:        cfg.Runtime.Limits.PIDs,
 		},
 		RunAsHostUser:  cfg.Runtime.RunAsHostUser,
+		Ports:          cfg.Runtime.Ports,
 		ProgressWriter: os.Stderr,
 	})
 	if err != nil {

@@ -14,12 +14,17 @@
 //     stdout. It pushes each line onto a buffered channel; readUntilPrompt
 //     consumes that channel. bufio.Reader is not safe for concurrent use,
 //     so this is the only safe pattern.
-//   - On command timeout we abandon the current bash session and start a
-//     fresh one. Trying to SIGINT the foreground child without a TTY is
-//     fragile (pkill semantics depend on parent/process-group state that
-//     docker exec does not give us); a clean restart is more honest. CWD
-//     and any in-session env vars are lost, which we surface to the model
-//     via the TimeoutError message.
+//   - On command timeout or cancel we abandon the current bash session and
+//     start a fresh one. Interrupting just the foreground child without a TTY
+//     is fragile; a clean restart is more honest. CWD and any in-session env
+//     vars are lost, which we surface to the model via the TimeoutError
+//     message.
+//   - Abandoning a session does not end what it was running: closing the
+//     attached connection signals no process. Bash leads its own process
+//     group, and every job it starts shares that group unless it was detached
+//     with setsid, so the restart kills the group from a separate exec. A
+//     server left running would otherwise keep its port, and every leftover
+//     counts against the container's PID limit.
 package executor
 
 import (
@@ -32,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -99,6 +105,11 @@ type Executor interface {
 	Close() error
 }
 
+// reportShellPID is the last line of the init script. Its output, the only
+// output the init script produces, is bash's pid: the process group the restart
+// kills.
+const reportShellPID = `printf '%s\n' "$$"`
+
 // bashInitScript prepares the bash session for headless use. We do NOT set
 // PS1: bash only emits PS1 when running interactively, and we attach without
 // a TTY so it would never be displayed. The executor emits its own sentinel
@@ -106,7 +117,19 @@ type Executor interface {
 func bashInitScript() string {
 	return "unset PROMPT_COMMAND HISTFILE\n" +
 		"export PS2=''\n" +
-		"stty -echo 2>/dev/null || true\n"
+		"stty -echo 2>/dev/null || true\n" +
+		reportShellPID + "\n"
+}
+
+// parseShellPID reads the pid reportShellPID printed. Pids 0 and 1 are refused
+// rather than trusted: as process groups they stand for the caller's own group
+// and for every process there is.
+func parseShellPID(output string) (int, error) {
+	pid, err := strconv.Atoi(strings.TrimSpace(output))
+	if err != nil || pid <= 1 {
+		return 0, fmt.Errorf("executor: bash reported %q as its pid", strings.TrimSpace(output))
+	}
+	return pid, nil
 }
 
 // writePromptSentinel writes a single bash command that prints promptMark and
@@ -162,11 +185,15 @@ type bashProcess struct {
 	close  func()
 }
 
-// bashOpener starts one bash process for the executor to drive. Splitting it
-// out keeps the sentinel protocol — the part with the invariants worth getting
-// right — independent of how the process is attached.
+// bashOpener starts one bash process for the executor to drive, and stops what
+// an abandoned one left running. Splitting it out keeps the sentinel protocol —
+// the part with the invariants worth getting right — independent of how the
+// process is attached.
 type bashOpener interface {
 	openBash(ctx context.Context) (*bashProcess, error)
+	// killProcessGroup sends SIGKILL to every process in the group. A group
+	// that no longer exists counts as stopped.
+	killProcessGroup(ctx context.Context, pgid int) error
 }
 
 // session bundles the state of one underlying bash invocation. When a command
@@ -179,6 +206,7 @@ type session struct {
 	stdoutR    *bufio.Reader
 	lineCh     chan readResult // owned end-to-end by this session
 	promptMark string
+	pgid       int
 }
 
 // DockerExecutor runs the persistent bash inside the session container via
@@ -266,10 +294,14 @@ func (e *DockerExecutor) openSession(ctx context.Context) (*session, string, err
 	}
 	initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	_, cwd, _, err := readUntilPromptFrom(initCtx, s.lineCh, s.promptMark, maxCapturedBytes)
+	initOutput, cwd, _, err := readUntilPromptFrom(initCtx, s.lineCh, s.promptMark, maxCapturedBytes)
 	if err != nil {
 		s.close()
 		return nil, "", fmt.Errorf("executor: read initial prompt: %w", err)
+	}
+	if s.pgid, err = parseShellPID(initOutput); err != nil {
+		s.close()
+		return nil, "", err
 	}
 	return s, cwd, nil
 }
@@ -390,7 +422,7 @@ func (e *DockerExecutor) Execute(ctx context.Context, cmd string) (string, error
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		// Either way bash is still running the command and still owns stdin,
 		// so the session cannot be reused — the next command would sit unread
-		// behind this one. Abandon it; the docker exec takes the child with it.
+		// behind this one. Abandon it, and kill what it was running.
 		cancelled := ctx.Err() != nil
 		reason := "timed out"
 		if cancelled {
@@ -402,7 +434,8 @@ func (e *DockerExecutor) Execute(ctx context.Context, cmd string) (string, error
 			"timeout", e.timeout.String(),
 			"out_bytes", len(out),
 		)
-		if rErr := e.restartSession(); rErr != nil {
+		stopped, rErr := e.restartSession()
+		if rErr != nil {
 			// Restart failed — the executor is now unusable. Mark closed so
 			// subsequent calls fail fast.
 			log.Error("restart after abandoned command failed; marking executor closed", "err", rErr)
@@ -414,9 +447,7 @@ func (e *DockerExecutor) Execute(ctx context.Context, cmd string) (string, error
 		return out, &TimeoutError{
 			Command:  cmd,
 			Duration: e.timeout,
-			Message: fmt.Sprintf(
-				"Command timed out after %s. The bash session was restarted, so CWD reset to %s and any session-local env vars were lost. Consider increasing command_timeout in agent.md.",
-				e.timeout, initialCWD),
+			Message:  timeoutMessage(e.timeout, stopped),
 		}
 	}
 	if err != nil {
@@ -446,11 +477,33 @@ func (e *DockerExecutor) Execute(ctx context.Context, cmd string) (string, error
 	return out, nil
 }
 
-// restartSession closes the current bash session (any in-flight child
-// processes go with it when the docker exec terminates) and opens a fresh
-// one. Caller must hold e.mu.
-func (e *DockerExecutor) restartSession() error {
+// timeoutMessage tells the model what a timeout cost it. Whether the command is
+// still running decides what it can do next: retry it, or find it first.
+func timeoutMessage(timeout time.Duration, stopped bool) string {
+	fate := "It was killed along with everything it started, except jobs detached with setsid."
+	if !stopped {
+		fate = "It could not be stopped and may still be running, along with anything it started."
+	}
+	return fmt.Sprintf(
+		"Command timed out after %s. %s The bash session was restarted, so CWD reset to %s and any session-local env vars were lost. "+
+			"A command meant to keep running, such as a server, has to be started in the background: setsid cmd >log 2>&1 &. "+
+			"Otherwise consider increasing command_timeout in agent.md.",
+		timeout, fate, initialCWD)
+}
+
+// restartSession kills the current bash session's process group, closes the
+// session, and opens a fresh one. stopped reports whether the kill took; a
+// failed kill is logged and the restart goes ahead regardless. Caller must
+// hold e.mu.
+func (e *DockerExecutor) restartSession() (stopped bool, err error) {
 	old := e.sess
+	killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer killCancel()
+	if killErr := e.opener.killProcessGroup(killCtx, old.pgid); killErr != nil {
+		log.Warn("could not kill the abandoned session's processes", "pgid", old.pgid, "err", killErr)
+	} else {
+		stopped = true
+	}
 	old.close()
 
 	// Best-effort: wait briefly for the old reader goroutine to drain its
@@ -474,12 +527,12 @@ open:
 	defer openCancel()
 	sess, cwd, err := e.openSession(openCtx)
 	if err != nil {
-		return err
+		return stopped, err
 	}
 	e.sess = sess
 	e.cwd = cwd
-	log.Info("bash session restarted", "cwd", cwd)
-	return nil
+	log.Info("bash session restarted", "cwd", cwd, "previous_processes_killed", stopped)
+	return stopped, nil
 }
 
 // truncate is a small helper for log fields so we don't dump multi-KB

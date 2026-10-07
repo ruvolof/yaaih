@@ -18,6 +18,7 @@ import (
 	"github.com/yuin/goldmark/text"
 	"go.abhg.dev/goldmark/frontmatter"
 
+	"github.com/ruvolof/yaaih/internal/docker"
 	"github.com/ruvolof/yaaih/internal/logging"
 	"github.com/ruvolof/yaaih/internal/skills"
 )
@@ -102,6 +103,13 @@ type RuntimeCfg struct {
 	// on the host. The agent loses root inside the container with it: no
 	// apt-get, nothing that needs raw sockets.
 	RunAsHostUser bool `yaml:"run_as_host_user"`
+
+	// Ports are published from the sandbox to the host, in `docker run -p`
+	// syntax with ranges ("8040-8050"), so the operator can reach servers the
+	// agent starts. Unlike docker, a port without a host IP is published on
+	// 127.0.0.1, and a bare port or range on the same host ports. Servers must
+	// listen on 0.0.0.0 inside the container to be reached.
+	Ports []string `yaml:"ports"`
 }
 
 // RuntimeLimits caps what the sandbox container may take from the host. A zero
@@ -463,6 +471,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Runtime.Limits.PIDs < 0 {
 		return errors.New("agent.md: `runtime.limits.pids` cannot be negative")
+	}
+	if _, err := docker.ParsePorts(c.Runtime.Ports); err != nil {
+		return fmt.Errorf("agent.md: `runtime.ports`: %w", err)
 	}
 	if c.Provider.APIKeyEnv != "" && os.Getenv(c.Provider.APIKeyEnv) == "" {
 		// Not fatal — local providers may legitimately omit auth — but warn.

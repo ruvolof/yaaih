@@ -33,6 +33,9 @@ func TestContainerIsCappedAndCannotGainPrivileges(t *testing.T) {
 	if !slices.Contains(hostCfg.SecurityOpt, "no-new-privileges") {
 		t.Errorf("SecurityOpt = %v, want no-new-privileges", hostCfg.SecurityOpt)
 	}
+	if hostCfg.Init == nil || !*hostCfg.Init {
+		t.Errorf("Init = %v, want an init as PID 1 to reap the processes the shell leaves behind", hostCfg.Init)
+	}
 	if cfg.User != "" || len(cfg.Env) != 0 {
 		t.Errorf("User = %q, Env = %v, want the image's own user and environment", cfg.User, cfg.Env)
 	}

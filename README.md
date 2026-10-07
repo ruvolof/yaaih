@@ -117,6 +117,7 @@ Paths are relative to the agent folder. Limits of `0` mean "no limit".
 | `runtime.workspace` | `./workspace` | Host folder mounted at `/workspace` |
 | `runtime.limits.memory` / `cpus` / `pids` | `2g` / `2` / `1024` | Sandbox resource caps |
 | `runtime.run_as_host_user` | `false` | Run the sandbox as your uid instead of root (see [Sandbox](#sandbox)) |
+| `runtime.ports` | none | Sandbox ports to publish on the host, such as `["8040-8050"]` (see [Sandbox](#sandbox)) |
 | `skills` / `tools` / `sessions` | `./skills` / `./tools` / `./sessions` | Folder locations |
 | `enable_workspace_tools` | `false` | Also load draft tools from `<workspace>/tools` |
 | `capabilities` | none | See above |
@@ -213,6 +214,17 @@ swap, 2 CPUs, 1024 processes and threads) and runs with `no-new-privileges`.
 Chromium alone uses a few hundred threads, so set `pids` much lower and the
 browser stops working. **The network is not restricted:** whatever the agent can
 reach from the sandbox, it can reach from your machine.
+
+To open a server the agent starts in the sandbox, publish its port with
+`runtime.ports`. This takes the `docker run -p` syntax, including ranges. A bare
+port or range such as `"8040-8050"` is published on the same ports of
+`127.0.0.1`, so `http://127.0.0.1:8045` reaches a server on 8045. Add an IP to
+publish elsewhere: `"0.0.0.0:8040-8050:8040-8050"` makes the ports reachable from
+your network. The server must listen on `0.0.0.0` inside the sandbox. The agent
+can read the published ports from `$YAAIH_PUBLISHED_PORTS`. Ports are claimed
+when the sandbox starts. If another harness running the same agent, or any other
+program, already holds one of them, the agent fails to start. Switching agents
+frees the ports.
 
 By default the sandbox runs as root. On native Docker Engine on Linux, files the
 agent creates in the workspace are then owned by root on the host.

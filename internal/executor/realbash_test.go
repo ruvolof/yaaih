@@ -11,8 +11,9 @@ import (
 )
 
 // localBash attaches a bash running on the test host, for the behaviour that
-// only a real parser can show: how multi-line input, syntax errors and stdin
-// are handled.
+// only a real shell can show: how multi-line input, syntax errors and stdin are
+// handled, and what survives a restart. Like the container's, it leads its own
+// process group.
 type localBash struct {
 	dir string
 }
@@ -20,6 +21,7 @@ type localBash struct {
 func (l localBash) openBash(ctx context.Context) (*bashProcess, error) {
 	cmd := exec.Command("bash", "--norc", "--noprofile")
 	cmd.Dir = l.dir
+	startInOwnProcessGroup(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -47,6 +49,10 @@ func (l localBash) openBash(ctx context.Context) (*bashProcess, error) {
 			outputR.Close()
 		},
 	}, nil
+}
+
+func (l localBash) killProcessGroup(ctx context.Context, pgid int) error {
+	return killLocalProcessGroup(pgid)
 }
 
 func newLocalExecutor(t *testing.T, timeout time.Duration) *DockerExecutor {

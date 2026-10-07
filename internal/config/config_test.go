@@ -345,6 +345,24 @@ func TestInvalidRuntimeLimitsAreRejected(t *testing.T) {
 	}
 }
 
+func TestRuntimePortsAreRead(t *testing.T) {
+	cfg, err := Load(writeAgent(t, t.TempDir(), "runtime:\n  ports: [\"8040-8050\", \"0.0.0.0:9000:80\"]"), Overrides{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := []string{"8040-8050", "0.0.0.0:9000:80"}; !slices.Equal(cfg.Runtime.Ports, want) {
+		t.Errorf("Ports = %v, want %v", cfg.Runtime.Ports, want)
+	}
+}
+
+func TestInvalidRuntimePortsAreRejected(t *testing.T) {
+	for _, ports := range []string{`["8050-8040"]`, `["9222"]`, `["1-65535"]`} {
+		if _, err := Load(writeAgent(t, t.TempDir(), "runtime:\n  ports: "+ports), Overrides{}); err == nil {
+			t.Errorf("Load accepted ports %s, want an error", ports)
+		}
+	}
+}
+
 func TestSkillsKeptOutOfTheAgentPrompt(t *testing.T) {
 	dir := t.TempDir()
 	p := writeAgent(t, dir, "")

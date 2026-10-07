@@ -55,6 +55,19 @@ func TestHandshakeEstablishesTheStartingCWD(t *testing.T) {
 	}
 }
 
+// The pid is the process group a restart kills: anything but a real pid above 1
+// would point the kill at the wrong processes.
+func TestParseShellPIDRefusesWhatIsNotAProcessGroup(t *testing.T) {
+	if pid, err := parseShellPID("4242\n\n"); err != nil || pid != 4242 {
+		t.Errorf("parseShellPID(4242) = %d, %v; want 4242", pid, err)
+	}
+	for _, output := range []string{"", "0", "1", "-7", "motd\n4242"} {
+		if pid, err := parseShellPID(output); err == nil {
+			t.Errorf("parseShellPID(%q) = %d, want it refused", output, pid)
+		}
+	}
+}
+
 func TestHandshakeFailurePropagates(t *testing.T) {
 	bash := newFakeBash(nil)
 	bash.failOpenFrom = 1
@@ -121,6 +134,9 @@ func TestTimeoutAbandonsTheSessionAndRecovers(t *testing.T) {
 	if opened := bash.sessionsOpened(); opened != 2 {
 		t.Fatalf("sessions opened = %d, want the hung one abandoned and replaced", opened)
 	}
+	if killed := bash.killedGroups(); len(killed) != 1 || killed[0] != fakeShellPID(1) {
+		t.Errorf("killed groups = %v, want only the hung session's %d", killed, fakeShellPID(1))
+	}
 
 	if out, want := execute(t, exec, "echo back"), withSentinelLead("back\n"); out != want {
 		t.Errorf("output after recovery = %q, want %q", out, want)
@@ -163,6 +179,30 @@ func TestCancelAbandonsTheSessionWithoutReportingATimeout(t *testing.T) {
 	// abandoned one.
 	if out, want := execute(t, exec, "echo back"), withSentinelLead("back\n"); out != want {
 		t.Errorf("output after cancellation = %q, want %q", out, want)
+	}
+}
+
+// A kill that did not take leaves the command running, perhaps holding a port;
+// the model has to hear that rather than be told it was stopped.
+func TestFailedKillIsReportedAndTheSessionStillRestarts(t *testing.T) {
+	bash := newFakeBash(map[string]bashReply{
+		"sleep 300": {block: true},
+		"echo back": {output: "back\n"},
+	})
+	bash.killErr = errors.New("exec create: container paused")
+	exec := newTestExecutor(t, bash, 200*time.Millisecond)
+
+	_, err := exec.Execute(context.Background(), "sleep 300")
+
+	var timeoutErr *TimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("err = %v, want a *TimeoutError", err)
+	}
+	if strings.Contains(timeoutErr.Message, "killed") || !strings.Contains(timeoutErr.Message, "may still be running") {
+		t.Errorf("TimeoutError.Message = %q, want it to say the command may still be running", timeoutErr.Message)
+	}
+	if out, want := execute(t, exec, "echo back"), withSentinelLead("back\n"); out != want {
+		t.Errorf("output after recovery = %q, want %q", out, want)
 	}
 }
 
