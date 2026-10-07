@@ -2,25 +2,27 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const testPromptMark = promptMarkPrefix + "0123456789abcdef0123456789abcdef__"
 
 // feed pushes lines onto a channel the way a session's reader goroutine does,
 // ending with a prompt sentinel carrying cwd.
-func feed(lines []string, cwd string) chan readResult {
-	ch := make(chan readResult, len(lines)+1)
+func feed(lines []string, cwd string) chan string {
+	ch := make(chan string, len(lines)+1)
 	for _, line := range lines {
-		ch <- readResult{line: line}
+		ch <- line
 	}
-	ch <- readResult{line: testPromptMark + ":" + cwd + "\n"}
+	ch <- testPromptMark + ":" + cwd + "\n"
 	return ch
 }
 
-func readAll(t *testing.T, ch chan readResult, maxBytes int) (string, string, int) {
+func readAll(t *testing.T, ch chan string, maxBytes int) (string, string, int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -105,8 +107,8 @@ func TestReadUntilPromptUncapped(t *testing.T) {
 }
 
 func TestReadUntilPromptStopsAtSentinelMidLine(t *testing.T) {
-	ch := make(chan readResult, 2)
-	ch <- readResult{line: "trailing output" + testPromptMark + ":/workspace\n"}
+	ch := make(chan string, 2)
+	ch <- "trailing output" + testPromptMark + ":/workspace\n"
 	out, cwd, _ := readAll(t, ch, maxCapturedBytes)
 
 	if out != "trailing output" {
@@ -114,6 +116,50 @@ func TestReadUntilPromptStopsAtSentinelMidLine(t *testing.T) {
 	}
 	if cwd != "/workspace" {
 		t.Errorf("cwd = %q, want /workspace", cwd)
+	}
+}
+
+// The reader closes the channel when bash's output ends. What bash wrote before
+// it went away is still the command's output, and the end has to come back as
+// the shell exiting rather than as a wait for a sentinel that will never come.
+func TestReadUntilPromptReportsTheShellExiting(t *testing.T) {
+	ch := make(chan string, 2)
+	ch <- "last words\n"
+	close(ch)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, _, _, err := readUntilPromptFrom(ctx, ch, testPromptMark, maxCapturedBytes)
+
+	if !errors.Is(err, errShellExited) {
+		t.Errorf("err = %v, want errShellExited", err)
+	}
+	if out != "last words\n" {
+		t.Errorf("output = %q, want what arrived before the end", out)
+	}
+}
+
+// A log field cut mid-rune would hold an invalid byte sequence.
+func TestTruncateCutsOnARuneBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		limit int
+		want  string
+	}{
+		{"short", 10, "short"},
+		{"abcdef", 3, "abc…"},
+		{"aé", 2, "a…"},
+		{"日本語", 4, "日…"},
+		{"日本語", 6, "日本…"},
+		{"🙂🙂", 3, "…"},
+	} {
+		got := truncate(tc.input, tc.limit)
+		if got != tc.want {
+			t.Errorf("truncate(%q, %d) = %q, want %q", tc.input, tc.limit, got, tc.want)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("truncate(%q, %d) = %q, not valid UTF-8", tc.input, tc.limit, got)
+		}
 	}
 }
 

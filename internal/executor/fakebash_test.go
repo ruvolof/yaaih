@@ -42,6 +42,9 @@ type bashReply struct {
 	// block models a command that has not returned: bash is still busy with it
 	// and never reaches the sentinel, so this process answers nothing further.
 	block bool
+	// exit models bash going away during the command: after output, its
+	// stdout ends.
+	exit bool
 }
 
 func newFakeBash(replies map[string]bashReply) *fakeBash {
@@ -168,6 +171,12 @@ func (f *fakeBash) run(stdin io.ReadCloser, stdout io.WriteCloser, pid int) {
 			if _, err := io.WriteString(stdout, reply.output); err != nil {
 				return
 			}
+		}
+		// Stdin is still read and discarded after an exit: the pipe has no
+		// buffer, and the executor writes the sentinel after the command.
+		if reply.exit {
+			stdout.Close()
+			busy = true
 		}
 	}
 }

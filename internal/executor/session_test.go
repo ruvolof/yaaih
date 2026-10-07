@@ -365,14 +365,72 @@ func (brokenWriter) Write([]byte) (int, error) { return 0, errors.New("connectio
 // or the tail of a command whose session was abandoned — must not be read back
 // as the next command's result.
 func TestDrainPendingDiscardsStaleLines(t *testing.T) {
-	sess := &session{lineCh: make(chan readResult, 4)}
-	sess.lineCh <- readResult{line: "stale from the last command\n"}
-	sess.lineCh <- readResult{line: "and more\n"}
+	sess := &session{lineCh: make(chan string, 4)}
+	sess.lineCh <- "stale from the last command\n"
+	sess.lineCh <- "and more\n"
 
-	sess.drainPending()
+	if !sess.drainPending() {
+		t.Error("drainPending reported a live session's output as ended")
+	}
 
 	if remaining := len(sess.lineCh); remaining != 0 {
 		t.Errorf("%d stale lines left, want them all discarded", remaining)
 	}
 	sess.drainPending()
+
+	close(sess.lineCh)
+	if sess.drainPending() {
+		t.Error("drainPending reported a session whose output has ended as alive")
+	}
+}
+
+// A shell that exits mid-command will never print the sentinel. The command has
+// to get what it printed and an error saying the shell was replaced, at once
+// rather than after the full command timeout, and the next command has to run.
+func TestShellExitingDuringACommandRestartsAtOnce(t *testing.T) {
+	bash := newFakeBash(map[string]bashReply{
+		"exit":      {output: "bye\n", exit: true},
+		"echo back": {output: "back\n"},
+	})
+	exec := newTestExecutor(t, bash, 30*time.Second)
+
+	start := time.Now()
+	out, err := exec.Execute(context.Background(), "exit")
+
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("Execute took %s to notice bash exiting, want it at once", elapsed)
+	}
+	var timeoutErr *TimeoutError
+	if err == nil || errors.As(err, &timeoutErr) {
+		t.Fatalf("err = %v, want an error that is not a timeout", err)
+	}
+	if !strings.Contains(err.Error(), "exited before this command finished") || !strings.Contains(err.Error(), initialCWD) {
+		t.Errorf("err = %q, want it to say bash exited and where CWD reset to", err)
+	}
+	if out != "bye\n" {
+		t.Errorf("output = %q, want what the command printed before bash exited", out)
+	}
+	if killed := bash.killedGroups(); len(killed) != 1 || killed[0] != fakeShellPID(1) {
+		t.Errorf("killed groups = %v, want the exited session's %d, for what it left running", killed, fakeShellPID(1))
+	}
+	if opened := bash.sessionsOpened(); opened != 2 {
+		t.Fatalf("sessions opened = %d, want the exited one replaced", opened)
+	}
+	if out, want := execute(t, exec, "echo back"), withSentinelLead("back\n"); out != want {
+		t.Errorf("output after the restart = %q, want %q", out, want)
+	}
+}
+
+func TestFailedRestartAfterAnExitClosesTheExecutor(t *testing.T) {
+	bash := newFakeBash(map[string]bashReply{"exit": {exit: true}})
+	bash.failOpenFrom = 2
+	bash.openErr = errors.New("container is gone")
+	exec := newTestExecutor(t, bash, 30*time.Second)
+
+	if _, err := exec.Execute(context.Background(), "exit"); err == nil || !strings.Contains(err.Error(), "could not be restarted") {
+		t.Errorf("err = %v, want it to say the shell could not be restarted", err)
+	}
+	if exec.IsRunning() {
+		t.Error("IsRunning = true after the session could not be reopened")
+	}
 }

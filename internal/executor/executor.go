@@ -19,6 +19,12 @@
 //     is fragile; a clean restart is more honest. CWD and any in-session env
 //     vars are lost, which we surface to the model via the TimeoutError
 //     message.
+//   - When bash itself goes away — `exit`, or killed by the container's
+//     memory or process limit — its output ends and the reader closes the
+//     session's channel. The executor restarts at once, the same way a
+//     timeout does, rather than waiting a full timeout on a shell that will
+//     never answer. Docker ends the exec's stream within a couple of seconds
+//     of bash exiting even while a job it started still holds bash's stdout.
 //   - Abandoning a session does not end what it was running: closing the
 //     attached connection signals no process. Bash leads its own process
 //     group, and every job it starts shares that group unless it was detached
@@ -41,6 +47,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/docker/docker/client"
 
@@ -170,11 +177,9 @@ func wrapCommand(cmd string) string {
 		commandFileVar, encoded, syntaxRejectedNote)
 }
 
-// readResult is one item produced by the reader goroutine.
-type readResult struct {
-	line string
-	err  error
-}
+// errShellExited is what a read returns once bash's output has ended: the
+// shell exited or was killed, and the session cannot run anything more.
+var errShellExited = errors.New("executor: bash exited")
 
 // bashProcess is one attached bash: a writer for its stdin, a reader carrying
 // its stdout and stderr already demultiplexed into a single stream, and a
@@ -204,7 +209,7 @@ type session struct {
 	proc       *bashProcess
 	stdinW     io.Writer
 	stdoutR    *bufio.Reader
-	lineCh     chan readResult // owned end-to-end by this session
+	lineCh     chan string // owned end-to-end by this session; closed when bash's output ends
 	promptMark string
 	pgid       int
 }
@@ -279,7 +284,7 @@ func (e *DockerExecutor) openSession(ctx context.Context) (*session, string, err
 		proc:       proc,
 		stdinW:     proc.stdin,
 		stdoutR:    bufio.NewReader(proc.stdout),
-		lineCh:     make(chan readResult, readerChanBuf),
+		lineCh:     make(chan string, readerChanBuf),
 		promptMark: promptMark,
 	}
 	go s.readerLoop()
@@ -308,22 +313,19 @@ func (e *DockerExecutor) openSession(ctx context.Context) (*session, string, err
 
 // readerLoop is the single producer that reads from the session's stdout.
 // One per session, never more than one alive at a time. Exits when the
-// underlying pipe returns an error (typically EOF when hijack is closed).
+// underlying pipe returns an error: EOF when bash exits or the session is
+// closed. Closing the channel rather than sending the error on it means the
+// end cannot be lost to a full buffer, and arrives only after every line
+// before it.
 func (s *session) readerLoop() {
 	defer logging.Recover("executor.reader")
+	defer close(s.lineCh)
 	for {
 		line, err := s.stdoutR.ReadString('\n')
 		if line != "" {
-			s.lineCh <- readResult{line: line}
+			s.lineCh <- line
 		}
 		if err != nil {
-			// Last gasp: try to deliver the error. If the channel buffer is
-			// full and nobody is consuming (e.g. we're being torn down), drop
-			// the marker and exit instead of blocking forever.
-			select {
-			case s.lineCh <- readResult{err: err}:
-			default:
-			}
 			return
 		}
 	}
@@ -341,25 +343,31 @@ func (s *session) close() {
 // drainPending discards any lines currently buffered on the session's
 // channel. Called before sending a new command so stale output from a
 // previous timed-out command can't be misread as the new command's result.
-func (s *session) drainPending() {
+// It reports false when the output has ended: bash exited since the last
+// command.
+func (s *session) drainPending() (alive bool) {
 	for {
 		select {
-		case <-s.lineCh:
+		case _, stillOpen := <-s.lineCh:
+			if !stillOpen {
+				return false
+			}
 		default:
-			return
+			return true
 		}
 	}
 }
 
 // readUntilPromptFrom consumes lines from ch until one contains promptMark.
 // Cancellable via ctx; if ctx expires it returns whatever has been buffered
-// so far plus ctx.Err().
+// so far plus ctx.Err(). A closed ch returns what was buffered plus
+// errShellExited.
 //
 // maxBytes caps what is retained, not what is consumed: the loop must reach the
 // sentinel either way, or the abandoned tail of this command's output would be
 // read as the next command's result. Whole lines are dropped rather than split,
 // so the retained text is never cut mid-rune. Zero means no cap.
-func readUntilPromptFrom(ctx context.Context, ch <-chan readResult, promptMark string, maxBytes int) (output, cwd string, discarded int, err error) {
+func readUntilPromptFrom(ctx context.Context, ch <-chan string, promptMark string, maxBytes int) (output, cwd string, discarded int, err error) {
 	var buf bytes.Buffer
 	keep := func(line string) {
 		if maxBytes > 0 && buf.Len()+len(line) > maxBytes {
@@ -372,11 +380,10 @@ func readUntilPromptFrom(ctx context.Context, ch <-chan readResult, promptMark s
 		select {
 		case <-ctx.Done():
 			return buf.String(), "", discarded, ctx.Err()
-		case rr := <-ch:
-			if rr.err != nil {
-				return buf.String(), "", discarded, rr.err
+		case line, stillOpen := <-ch:
+			if !stillOpen {
+				return buf.String(), "", discarded, errShellExited
 			}
-			line := rr.line
 			if idx := strings.Index(line, promptMark+":"); idx >= 0 {
 				keep(line[:idx])
 				rest := strings.TrimRight(line[idx+len(promptMark)+1:], "\r\n")
@@ -391,7 +398,8 @@ func readUntilPromptFrom(ctx context.Context, ch <-chan readResult, promptMark s
 // prompt. cmd may span several lines; one with a syntax error is refused
 // without running any of it, and bash's error comes back as the output. On
 // timeout the current bash session is abandoned and a fresh one is started;
-// the caller receives a *TimeoutError.
+// the caller receives a *TimeoutError. If bash has exited, before the command
+// or during it, a fresh session is started too, and the error says so.
 func (e *DockerExecutor) Execute(ctx context.Context, cmd string) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -402,7 +410,10 @@ func (e *DockerExecutor) Execute(ctx context.Context, cmd string) (string, error
 	// Discard any stale output left on the channel before sending — defensive
 	// against a previous timed-out command that may have produced lines after
 	// we abandoned its session.
-	e.sess.drainPending()
+	if !e.sess.drainPending() {
+		log.Warn("bash exited between commands, restarting bash session", "cmd", truncate(cmd, 200))
+		return "", e.restartAfterExit(false)
+	}
 
 	log.Debug("send", "cmd", truncate(cmd, 200), "cwd", e.cwd)
 	start := time.Now()
@@ -450,6 +461,13 @@ func (e *DockerExecutor) Execute(ctx context.Context, cmd string) (string, error
 			Message:  timeoutMessage(e.timeout, stopped),
 		}
 	}
+	if errors.Is(err, errShellExited) {
+		log.Warn("bash exited during a command, restarting bash session",
+			"cmd", truncate(cmd, 200),
+			"out_bytes", len(out),
+		)
+		return out, e.restartAfterExit(true)
+	}
 	if err != nil {
 		log.Error("read prompt failed", "err", err, "out_bytes", len(out))
 		return out, err
@@ -491,6 +509,41 @@ func timeoutMessage(timeout time.Duration, stopped bool) string {
 		timeout, fate, initialCWD)
 }
 
+// restartAfterExit replaces a session whose bash has exited and returns the
+// error that tells the model what that cost it. duringCommand says whether bash
+// went away after the command was sent, or before, in which case the command
+// never ran. Caller must hold e.mu.
+func (e *DockerExecutor) restartAfterExit(duringCommand bool) error {
+	stopped, err := e.restartSession()
+	if err != nil {
+		log.Error("restart after bash exited failed; marking executor closed", "err", err)
+		e.closed = true
+		return fmt.Errorf("executor: bash exited and could not be restarted: %w", err)
+	}
+	return errors.New(shellExitedMessage(duringCommand, stopped))
+}
+
+// shellExitedMessage is restartAfterExit's error. Like timeoutMessage, it says
+// whether what the old session left running was stopped.
+func shellExitedMessage(duringCommand, stopped bool) string {
+	what := "bash had exited since the last command, so this command was not run: the shell was killed, " +
+		"for instance by the container's memory or process limit."
+	if duringCommand {
+		what = "bash exited before this command finished, so it may not have run in full: the command ran exit, " +
+			"or the shell was killed, for instance by the container's memory or process limit."
+	}
+	fate := "Whatever the old session left running was killed, except jobs detached with setsid."
+	if !stopped {
+		fate = "Whatever the old session left running could not be stopped and may still be running."
+	}
+	message := fmt.Sprintf("%s A new bash session was started, so CWD reset to %s and any session-local env vars were lost. %s",
+		what, initialCWD, fate)
+	if !duringCommand {
+		message += " Run the command again."
+	}
+	return message
+}
+
 // restartSession kills the current bash session's process group, closes the
 // session, and opens a fresh one. stopped reports whether the kill took; a
 // failed kill is logged and the restart goes ahead regardless. Caller must
@@ -506,17 +559,17 @@ func (e *DockerExecutor) restartSession() (stopped bool, err error) {
 	}
 	old.close()
 
-	// Best-effort: wait briefly for the old reader goroutine to drain its
-	// final EOF onto its own channel. This is purely hygiene — the channel
-	// is owned by the old session and goes away with it.
+	// Best-effort: wait briefly for the old reader goroutine to reach EOF and
+	// close its channel. This is purely hygiene — the channel is owned by the
+	// old session and goes away with it.
 	drainCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 	for {
 		select {
 		case <-drainCtx.Done():
 			goto open
-		case rr := <-old.lineCh:
-			if rr.err != nil {
+		case _, stillOpen := <-old.lineCh:
+			if !stillOpen {
 				goto open
 			}
 		}
@@ -536,10 +589,14 @@ open:
 }
 
 // truncate is a small helper for log fields so we don't dump multi-KB
-// commands or outputs into the log file by accident.
+// commands or outputs into the log file by accident. n is a byte budget; the
+// cut steps back to the start of a rune so the log never holds half of one.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "…"
 }

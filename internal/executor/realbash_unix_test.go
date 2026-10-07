@@ -81,6 +81,64 @@ func TestTimeoutKillsWhatTheCommandStarted(t *testing.T) {
 	waitUntilGone(t, "the background job", readPID(t, filepath.Join(dir, "background.pid")))
 }
 
+// A model that runs exit ends the shell. What it had started is still in the
+// shell's process group and has to be killed with it, and the next command has
+// to run in a fresh session. Docker ends the exec's stream once bash exits even
+// while a child holds bash's stdout; a local pipe stays open, so the child here
+// writes elsewhere.
+func TestExitKillsWhatTheShellStartedAndRestarts(t *testing.T) {
+	exec := newLocalExecutor(t, 30*time.Second)
+	dir := exec.CWD()
+	execute(t, exec, "sleep 1000 >/dev/null 2>&1 & echo $! > child.pid\nmkdir sub && cd sub")
+
+	start := time.Now()
+	_, err := exec.Execute(context.Background(), "exit")
+
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("Execute took %s to notice bash exiting, want it at once", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), "exited before this command finished") {
+		t.Fatalf("err = %v, want it to say bash exited", err)
+	}
+	if !strings.Contains(err.Error(), "was killed") {
+		t.Errorf("err = %q, want it to say what the old session left running was killed", err)
+	}
+	waitUntilGone(t, "the shell's child", readPID(t, filepath.Join(dir, "child.pid")))
+	if out := execute(t, exec, "echo alive"); strings.TrimSpace(out) != "alive" {
+		t.Errorf("output after the restart = %q, want alive", out)
+	}
+	if exec.CWD() != dir {
+		t.Errorf("CWD = %q, want it back at the session's start, %q", exec.CWD(), dir)
+	}
+}
+
+// A shell killed while idle, by the OOM killer say, has no command in flight to
+// see it go. The next command must find out before it is sent rather than wait
+// out its timeout, and must not run in a session it was not written for.
+func TestShellKilledBetweenCommandsIsReplacedBeforeTheNextOne(t *testing.T) {
+	exec := newLocalExecutor(t, 30*time.Second)
+	dir := exec.CWD()
+	execute(t, exec, "(sleep 0.2; kill -KILL $$; echo $$ > killed.pid) >/dev/null 2>&1 &")
+	readPID(t, filepath.Join(dir, "killed.pid"))
+	time.Sleep(200 * time.Millisecond)
+
+	start := time.Now()
+	_, err := exec.Execute(context.Background(), "touch ran")
+
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("Execute took %s to notice bash was gone, want it at once", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), "was not run") {
+		t.Fatalf("err = %v, want it to say the command was not run", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "ran")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("the command ran anyway (stat err = %v)", statErr)
+	}
+	if out := execute(t, exec, "echo alive"); strings.TrimSpace(out) != "alive" {
+		t.Errorf("output after the restart = %q, want alive", out)
+	}
+}
+
 // The shell_exec description tells the model to start servers this way, so it
 // has to hold: the job's output stays out of later results, and it survives the
 // restart a later timeout causes.
