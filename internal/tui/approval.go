@@ -243,11 +243,12 @@ func (m *Model) handleApprovalKey(key string) bool {
 }
 
 // keysBesideApproval are the keys that keep working while a request waits:
-// the ones for reading the conversation that led to it, copying, and quitting.
+// the ones for reading the conversation that led to it, copying, quitting, and
+// looking around the sandbox before answering.
 // Everything else is held back, so a keystroke meant for the panel never lands
 // in the input box or sends a message.
 var keysBesideApproval = map[string]bool{
-	"ctrl+c": true, "ctrl+d": true,
+	"ctrl+c": true, "ctrl+d": true, "ctrl+]": true,
 	"ctrl+y": true, "ctrl+t": true,
 	"ctrl+o": true, "alt+up": true, "alt+down": true,
 	"pgup": true, "pgdown": true, "ctrl+home": true, "ctrl+end": true,

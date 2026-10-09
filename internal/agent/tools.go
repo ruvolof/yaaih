@@ -4,7 +4,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -14,7 +13,6 @@ import (
 	"github.com/ruvolof/yaaih/internal/config"
 	"github.com/ruvolof/yaaih/internal/executor"
 	"github.com/ruvolof/yaaih/internal/llm"
-	"github.com/ruvolof/yaaih/internal/toolout"
 )
 
 // ToolFunc is the runtime implementation of a tool. It receives the raw JSON
@@ -149,52 +147,9 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 		r.tools[t.Def.Name] = t
 	}
 
-	register(runner != nil, &Tool{
-		Capability: "shell",
-		Restricted: true,
-		Def: llm.ToolDefinition{
-			Name: "shell_exec",
-			Description: fmt.Sprintf(
-				"Execute a shell command in the persistent bash session inside the sandbox container. CWD and env vars persist across calls. "+
-					"Output above %s is cut down before you see it — the first and last part are kept and the full text is written to a file "+
-					"named in the result, which you can then grep. Filtering in the command itself (grep, head, tail, wc) gets you a better "+
-					"answer than reading the cut-down version of an unfiltered one. "+
-					"A call returns only when the command exits. One still running after %d seconds is killed with everything it started, "+
-					"and the session restarts with CWD and env vars lost. Start anything meant to keep running — a server, a watcher — "+
-					"detached and with its output in a file: `setsid cmd >/tmp/cmd.log 2>&1 &`, then read the log with tail. "+
-					"Without setsid the job is killed at the next timeout; without the redirect its output spills into later results.",
-				toolout.HumanBytes(cfg.Options.MaxToolResultBytes), cfg.Options.CommandTimeout),
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"command": map[string]any{
-						"type":        "string",
-						"description": "The command to execute. May span several lines, including heredocs; stdin is empty, so nothing can prompt for input.",
-					},
-				},
-				"required": []string{"command"},
-			},
-		},
-		Fn: func(ctx context.Context, args string) (string, error) {
-			var p struct {
-				Command string `json:"command"`
-			}
-			if err := json.Unmarshal([]byte(args), &p); err != nil {
-				return "", fmt.Errorf("invalid args: %w", err)
-			}
-			if strings.TrimSpace(p.Command) == "" {
-				return "", errors.New("command is empty")
-			}
-			out, err := runner.Execute(ctx, p.Command)
-			if err != nil {
-				if te, ok := err.(*executor.TimeoutError); ok {
-					return out + "\n[" + te.Message + "]", nil
-				}
-				return out, err
-			}
-			return out, nil
-		},
-	})
+	for _, tool := range shellTools(cfg, runner) {
+		register(runner != nil, tool)
+	}
 
 	// Browser tools — only browser_eval is restricted.
 	register(br != nil, &Tool{
@@ -286,7 +241,7 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 			Name: "browser_content",
 			Description: "Return the current page as Markdown: title, URL, then the main content with " +
 				"navigation and footers dropped and link targets given as absolute URLs.",
-			Parameters:  emptyObjectSchema(),
+			Parameters: emptyObjectSchema(),
 		},
 		Fn: func(ctx context.Context, args string) (string, error) {
 			return br.Content(ctx)

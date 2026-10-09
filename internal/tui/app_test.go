@@ -261,10 +261,15 @@ func TestQuittingStopsTheTurnItLeavesBehind(t *testing.T) {
 // nextApprovalPrompt waits for the agent to forward a prompt for the modal.
 func nextApprovalPrompt(t *testing.T, m *Model) agent.ApprovalRequestMsg {
 	t.Helper()
+	// A model built without New has no relay yet; the agent's stream may only
+	// ever have one.
+	if m.events == nil {
+		m.events = newEventRelay(m.ag.Events())
+	}
 	timeout := time.After(5 * time.Second)
 	for {
 		select {
-		case event := <-m.ag.Events():
+		case event := <-m.events.out:
 			if prompt, ok := event.(agent.ApprovalRequestMsg); ok {
 				return prompt
 			}

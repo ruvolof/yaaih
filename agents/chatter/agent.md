@@ -12,7 +12,7 @@ safety:
   approval_required: false
 options:
   max_tool_iterations: 0
-  command_timeout: 120
+  command_wait: 60
   max_context_tokens: 950000
 ---
 

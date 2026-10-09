@@ -147,7 +147,14 @@ type Safety struct {
 // Options is the bag of behavioural knobs for the agent loop.
 type Options struct {
 	MaxToolIterations int `yaml:"max_tool_iterations"`
-	CommandTimeout    int `yaml:"command_timeout"` // seconds
+
+	// CommandWait is how long shell_exec waits for a command, in seconds,
+	// before handing it back to the model as a background job. Nothing is
+	// killed when it runs out.
+	CommandWait int `yaml:"command_wait"`
+	// LegacyCommandTimeout reads command_timeout, an alias of command_wait
+	// honoured only when command_wait is unset.
+	LegacyCommandTimeout int `yaml:"command_timeout"`
 
 	// MaxToolResultBytes bounds how much of a tool's output is kept in the
 	// conversation. History is re-sent on every subsequent request, so this is
@@ -173,19 +180,19 @@ type Options struct {
 
 	// BrowserTimeout caps navigation, clicks, typing, and waits in the browser
 	// tools. It bounds a single browser operation, not a whole turn, so it is
-	// shorter than CommandTimeout.
+	// shorter than CommandWait.
 	BrowserTimeout int `yaml:"browser_timeout"` // seconds
 }
 
 // Defaults applied after parsing if the agent.md leaves fields blank.
 const (
-	defaultRuntimeImage  = "yaaih-runtime:latest"
-	defaultWorkspace     = "./workspace"
-	defaultSkillsDir     = "skills"
-	defaultToolsDir      = "tools"
-	defaultSessionsDir   = "sessions"
-	defaultMaxIterations = 25
-	defaultCmdTimeoutSec = 120
+	defaultRuntimeImage   = "yaaih-runtime:latest"
+	defaultWorkspace      = "./workspace"
+	defaultSkillsDir      = "skills"
+	defaultToolsDir       = "tools"
+	defaultSessionsDir    = "sessions"
+	defaultMaxIterations  = 25
+	defaultCommandWaitSec = 60
 
 	// Enough for Chromium with a few tabs alongside a build or a test run; low
 	// enough that a runaway process is stopped by the sandbox rather than by
@@ -400,8 +407,13 @@ func applyDefaults(c *Config) {
 	if c.Options.MaxToolIterations == 0 {
 		c.Options.MaxToolIterations = defaultMaxIterations
 	}
-	if c.Options.CommandTimeout == 0 {
-		c.Options.CommandTimeout = defaultCmdTimeoutSec
+	if c.Options.CommandWait == 0 && c.Options.LegacyCommandTimeout > 0 {
+		log.Warn("options.command_timeout is deprecated; it now sets options.command_wait, how long shell_exec waits before backgrounding a command",
+			"seconds", c.Options.LegacyCommandTimeout)
+		c.Options.CommandWait = c.Options.LegacyCommandTimeout
+	}
+	if c.Options.CommandWait == 0 {
+		c.Options.CommandWait = defaultCommandWaitSec
 	}
 	if c.Options.MaxToolResultBytes == 0 {
 		c.Options.MaxToolResultBytes = defaultMaxToolResultBytes

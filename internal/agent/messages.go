@@ -45,12 +45,6 @@ type ToolCallResultMsg struct {
 	Err    string
 }
 
-// TimeoutMsg is rendered as a prominent warning in the TUI.
-type TimeoutMsg struct {
-	Command string
-	Message string
-}
-
 // StatsUpdateMsg refreshes the sidebar's token/cost totals: Session is the
 // current session's usage, Global is the whole run's usage. ContextTokens is
 // what the last request cost against ContextBudget, so the operator can see the

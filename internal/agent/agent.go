@@ -39,7 +39,6 @@ func (AssistantMessageMsg) isAgentEvent() {}
 func (AssistantDoneMsg) isAgentEvent()    {}
 func (ToolCallStartMsg) isAgentEvent()    {}
 func (ToolCallResultMsg) isAgentEvent()   {}
-func (TimeoutMsg) isAgentEvent()          {}
 func (StatsUpdateMsg) isAgentEvent()      {}
 func (ApprovalRequestMsg) isAgentEvent()  {}
 func (HistoryTrimmedMsg) isAgentEvent()   {}
@@ -675,10 +674,6 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 					"err", err,
 					"elapsed_ms", elapsed.Milliseconds(),
 				)
-				var te *executor.TimeoutError
-				if errors.As(err, &te) {
-					a.publish(TimeoutMsg{Command: te.Command, Message: te.Message})
-				}
 				a.answerToolCall(tc, "error: "+err.Error()+"\n"+result, err.Error())
 				continue
 			}

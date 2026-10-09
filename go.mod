@@ -12,11 +12,13 @@ require (
 	github.com/docker/docker v27.4.1+incompatible
 	github.com/docker/go-connections v0.5.0
 	github.com/docker/go-units v0.5.0
+	github.com/muesli/cancelreader v0.2.2
 	github.com/mxschmitt/playwright-go v0.6100.0
 	github.com/openai/openai-go v0.1.0-beta.10
 	github.com/yuin/goldmark v1.7.13
 	go.abhg.dev/goldmark/frontmatter v0.2.0
 	golang.org/x/sys v0.42.0
+	golang.org/x/term v0.41.0
 )
 
 require (
@@ -51,7 +53,6 @@ require (
 	github.com/moby/term v0.5.2 // indirect
 	github.com/morikuni/aec v1.1.0 // indirect
 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
-	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/muesli/reflow v0.3.0 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
@@ -72,7 +73,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/term v0.41.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

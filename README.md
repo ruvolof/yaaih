@@ -95,7 +95,7 @@ starts the Docker sandbox; an agent with none runs without Docker.
 
 | Capability | Tools |
 | --- | --- |
-| `shell` | `shell_exec`: commands in a persistent bash session |
+| `shell` | `shell_exec`: commands in a persistent bash session; `shell_wait`, `shell_kill`, `shell_jobs`: background jobs (see [Shell jobs](#shell-jobs)) |
 | `filesystem` | `file_read`, `file_write`, `file_list` (paths inside the workspace) |
 | `browser` | `browser_navigate`, `browser_content` (page as Markdown), `browser_click`, `browser_type`, `browser_wait_for`, `browser_screenshot`, `browser_eval`, `browser_back`, `browser_tabs`, `browser_select_tab`, `browser_close_tab` |
 | `scripts` | the agent's script tools (see below) |
@@ -123,7 +123,7 @@ Paths are relative to the agent folder. Limits of `0` mean "no limit".
 | `capabilities` | none | See above |
 | `safety.approval_required` | `false` | Ask before restricted tool calls |
 | `options.max_tool_iterations` | `25` | Tool calls the model may make in one turn |
-| `options.command_timeout` | `120` | Seconds a shell command may run |
+| `options.command_wait` | `60` | Seconds `shell_exec` waits for a command before leaving it running in the background (`command_timeout` is read as an alias) |
 | `options.max_context_tokens` | `64000` | Ceiling on one request's prompt; set it below the model's context window |
 | `options.max_tool_result_bytes` | `32768` | Tool output kept in the conversation; the rest is saved under `<workspace>/.harness/tool-output/` |
 | `options.max_file_read_lines` | `500` | Lines `file_read` returns per call |
@@ -191,8 +191,8 @@ Once a draft looks right, copy both files into `tools/` to promote it. The
 
 ## Safety and limits
 
-**Approvals.** With `safety.approval_required: true`, `shell_exec`, `file_write`,
-`browser_eval`, and restricted script tools wait for your answer in a panel above
+**Approvals.** With `safety.approval_required: true`, `shell_exec`, `shell_kill`,
+`file_write`, `browser_eval`, and restricted script tools wait for your answer in a panel above
 the input:
 
 | Key | Effect |
@@ -233,6 +233,20 @@ cannot `apt-get install` or use raw sockets. Run
 `sudo chown -R $(id -u):$(id -g)` on the workspace once to take back files
 created earlier. On rootless Docker and Windows the setting is ignored because
 it is not needed.
+
+<a id="shell-jobs"></a>
+**Shell jobs.** Every shell command runs as its own numbered job. The working
+directory, variables, functions, aliases, and shell options still carry over
+from one command to the next, as in a single bash session. `shell_exec` waits up
+to `command_wait` seconds; the model can ask for anything from 0 to 600 per call.
+A command still running then is not killed. It keeps running in the background
+and the model gets what it printed so far, how long ago it last printed, and
+what its processes are doing. It can then wait for it (`shell_wait`), stop it
+(`shell_kill`), or use the shell for something else meanwhile, such as finding
+out why it hangs. A command that finishes in the background has its `cd` and
+`export` changes discarded. Each job's full output is in
+`<workspace>/.harness/jobs/<id>.log`. At most 8 jobs run at once, and pressing
+`esc` while the model waits on a job stops that job.
 
 **Context.** Every request re-sends the whole conversation. Above
 `max_context_tokens`, the oldest exchanges stop being sent, and the model is told
@@ -277,10 +291,21 @@ The sidebar shows how full the context is, and the conversation warns you at
 | Tab | Complete commands, agent names, session ids, skill names |
 | Click, Ctrl+O | Expand or collapse a tool call |
 | Alt+↑ / Alt+↓ | Select an earlier or later tool call |
-| PgUp / PgDn, mouse wheel | Scroll the conversation |
+| PgUp / PgDn, mouse wheel, scrollbar | Scroll the conversation |
 | Drag, then Ctrl+Y | Copy the selection |
 | Ctrl+Y with nothing selected | Copy the last reply as Markdown |
 | Ctrl+T | Copy the whole conversation |
+| Ctrl+] | Switch between the chat and a shell in the sandbox (see below) |
+
+**The sandbox shell.** Ctrl+] hands the whole terminal to an interactive bash
+inside the sandbox, and Ctrl+] again brings the chat back. The shell starts in
+the agent's current directory with its variables, functions, and aliases, and
+the agent's commands are in its history (↑, Ctrl+R) to rerun or edit.
+`yaaih-sync` reloads both after the agent has moved on. Nothing you do in it
+changes the agent's session. The shell stays open between visits, and output
+that arrives while you are in the chat is shown when you return. The agent
+keeps working while you are in the shell; if it stops for an approval, the
+shell says so.
 
 ## Logs
 

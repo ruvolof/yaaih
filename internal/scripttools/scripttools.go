@@ -212,7 +212,7 @@ func loadOne(dir, abs string) (Manifest, bool) {
 // drafted into <workspace>/tools are also loaded; a workspace draft shadows a
 // promoted tool of the same name so the agent can iterate before the operator
 // promotes it.
-func Apply(toolsDir, workspaceDir string, enableWorkspaceTools bool, runner executor.Executor, registry *agent.Registry) ([]Registered, error) {
+func Apply(toolsDir, workspaceDir string, enableWorkspaceTools bool, runner executor.Runner, registry *agent.Registry) ([]Registered, error) {
 	registry.RemoveByCapability(Capability)
 
 	registered, err := loadAndRegister(toolsDir, ContainerToolsMount, runner, registry)
@@ -241,7 +241,7 @@ func shadowedBy(promoted, drafts []Registered) []Registered {
 
 // loadAndRegister loads the manifests in hostDir and registers them to run from
 // containerDir inside the sandbox. A missing hostDir contributes nothing.
-func loadAndRegister(hostDir, containerDir string, runner executor.Executor, registry *agent.Registry) ([]Registered, error) {
+func loadAndRegister(hostDir, containerDir string, runner executor.Runner, registry *agent.Registry) ([]Registered, error) {
 	manifests, err := Load(hostDir)
 	if err != nil {
 		return nil, fmt.Errorf("load manifests from %s: %w", hostDir, err)
@@ -252,7 +252,7 @@ func loadAndRegister(hostDir, containerDir string, runner executor.Executor, reg
 // Register builds a Tool for each manifest and adds it to the registry. The
 // Tool's Fn shells out to the script at containerDir/<executable> inside the
 // container via runner.
-func Register(manifests []Manifest, containerDir string, runner executor.Executor, registry *agent.Registry) []Registered {
+func Register(manifests []Manifest, containerDir string, runner executor.Runner, registry *agent.Registry) []Registered {
 	registered := make([]Registered, 0, len(manifests))
 	for _, m := range manifests {
 		restricted := m.restrictedFrom(containerDir)
@@ -289,7 +289,7 @@ func Register(manifests []Manifest, containerDir string, runner executor.Executo
 // containerDir is where the executable lives inside the sandbox. The read-only
 // /tools mount cannot be chmod'd, so its scripts must already be executable;
 // scripts under the writable workspace are chmod'd at run time.
-func buildScriptFn(m Manifest, containerDir string, runner executor.Executor) agent.ToolFunc {
+func buildScriptFn(m Manifest, containerDir string, runner executor.Runner) agent.ToolFunc {
 	scriptPath := path.Join(containerDir, filepath.ToSlash(m.Executable))
 	writable := containerDir != ContainerToolsMount
 	return func(ctx context.Context, args string) (string, error) {
@@ -300,23 +300,19 @@ func buildScriptFn(m Manifest, containerDir string, runner executor.Executor) ag
 			args = "{}"
 		}
 
-		// Bound the call to the manifest timeout. The executor additionally
-		// caps every command at the configured command_timeout, so the
-		// effective limit is whichever is smaller — no extra plumbing needed.
-		runCtx := ctx
-		if d := m.timeout(); d > 0 {
-			var cancel context.CancelFunc
-			runCtx, cancel = context.WithTimeout(ctx, d)
-			defer cancel()
-		}
+		// A script tool's result is its output, so it cannot be handed back
+		// half-done the way a shell command can: past its timeout it is killed.
+		runCtx, cancel := context.WithTimeout(ctx, m.timeout())
+		defer cancel()
 
-		out, err := runner.Execute(runCtx, buildCommand(scriptPath, args, writable))
+		result, err := runner.Run(runCtx, buildCommand(scriptPath, args, writable))
 		if err != nil {
-			// Timeouts and executor failures surface as-is; the agent loop
-			// renders timeouts specially.
-			return out, err
+			if runCtx.Err() != nil && ctx.Err() == nil {
+				return result.Output, fmt.Errorf("script tool %q was stopped after its %s timeout", m.Name, m.timeout())
+			}
+			return result.Output, err
 		}
-		return parseResult(m.Name, out)
+		return parseResult(m.Name, result.Output)
 	}
 }
 

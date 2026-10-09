@@ -15,6 +15,9 @@ import (
 // entry here is a deliberate decision rather than an oversight.
 var builtinCapabilities = map[string]string{
 	"shell_exec":         "shell",
+	"shell_wait":         "shell",
+	"shell_kill":         "shell",
+	"shell_jobs":         "shell",
 	"browser_navigate":   "browser",
 	"browser_back":       "browser",
 	"browser_wait_for":   "browser",

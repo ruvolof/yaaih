@@ -245,7 +245,7 @@ func buildAgentRuntime(ctx context.Context, agentDir, resumeID string, newSessio
 		"tools_dir", cfg.ToolsDir,
 		"sessions_dir", cfg.SessionsDir,
 		"max_iter", cfg.Options.MaxToolIterations,
-		"cmd_timeout_sec", cfg.Options.CommandTimeout,
+		"command_wait_sec", cfg.Options.CommandWait,
 		"max_context_tokens", cfg.Options.MaxContextTokens,
 	)
 
@@ -356,8 +356,7 @@ func setupRuntime(ctx context.Context, cfg *config.Config) (executor.Executor, *
 		return nil, nil, nil, err
 	}
 
-	cmdTimeout := time.Duration(cfg.Options.CommandTimeout) * time.Second
-	runner, err := executor.NewDockerExecutor(ctx, rt.Client(), rt.ContainerID(), cmdTimeout)
+	runner, err := executor.NewDockerExecutor(ctx, rt.Client(), rt.ContainerID(), cfg.Runtime.Workspace)
 	if err != nil {
 		_ = rt.Stop(ctx)
 		_ = rt.Close()

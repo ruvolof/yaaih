@@ -6,9 +6,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ruvolof/yaaih/internal/agent"
 	"github.com/ruvolof/yaaih/internal/config"
+	"github.com/ruvolof/yaaih/internal/executor"
 )
 
 // stubRunner records the last command and returns canned output, standing in
@@ -19,13 +21,28 @@ type stubRunner struct {
 	err     error
 }
 
-func (s *stubRunner) Execute(ctx context.Context, cmd string) (string, error) {
+func (s *stubRunner) Run(ctx context.Context, cmd string) (executor.JobResult, error) {
 	s.lastCmd = cmd
-	return s.out, s.err
+	return executor.JobResult{Output: s.out}, s.err
 }
-func (s *stubRunner) CWD() string     { return "/workspace" }
-func (s *stubRunner) IsRunning() bool { return true }
-func (s *stubRunner) Close() error    { return nil }
+
+func (s *stubRunner) Start(ctx context.Context, cmd string, wait time.Duration) (executor.JobResult, error) {
+	return s.Run(ctx, cmd)
+}
+
+func (s *stubRunner) Wait(ctx context.Context, id int, wait time.Duration) (executor.JobResult, error) {
+	return executor.JobResult{}, nil
+}
+
+func (s *stubRunner) Kill(ctx context.Context, id int) (executor.JobResult, error) {
+	return executor.JobResult{}, nil
+}
+
+func (s *stubRunner) Jobs() []executor.JobInfo         { return nil }
+func (s *stubRunner) TakeFinished() []executor.JobInfo { return nil }
+func (s *stubRunner) CWD() string                      { return "/workspace" }
+func (s *stubRunner) IsRunning() bool                  { return true }
+func (s *stubRunner) Close() error                     { return nil }
 
 func writeFile(t *testing.T, dir, name, content string) string {
 	t.Helper()

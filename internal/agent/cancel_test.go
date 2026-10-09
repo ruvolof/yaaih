@@ -5,7 +5,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/ruvolof/yaaih/internal/executor"
 	"github.com/ruvolof/yaaih/internal/llm"
 )
 
@@ -14,34 +16,26 @@ import (
 // It records what reached it so a test can assert the calls after the cancel
 // were never dispatched.
 type blockingRunner struct {
+	stubRunner
 	entered chan struct{}
 	once    sync.Once
-
-	mu       sync.Mutex
-	commands []string
 }
 
 func newBlockingRunner() *blockingRunner {
 	return &blockingRunner{entered: make(chan struct{})}
 }
 
-func (r *blockingRunner) Execute(ctx context.Context, cmd string) (string, error) {
+func (r *blockingRunner) Start(ctx context.Context, cmd string, wait time.Duration) (executor.JobResult, error) {
+	return r.Run(ctx, cmd)
+}
+
+func (r *blockingRunner) Run(ctx context.Context, cmd string) (executor.JobResult, error) {
 	r.mu.Lock()
 	r.commands = append(r.commands, cmd)
 	r.mu.Unlock()
 	r.once.Do(func() { close(r.entered) })
 	<-ctx.Done()
-	return "", ctx.Err()
-}
-
-func (r *blockingRunner) CWD() string     { return "/workspace" }
-func (r *blockingRunner) IsRunning() bool { return true }
-func (r *blockingRunner) Close() error    { return nil }
-
-func (r *blockingRunner) executed() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]string(nil), r.commands...)
+	return executor.JobResult{}, ctx.Err()
 }
 
 // streamThenBlockProvider emits one chunk and then holds the stream open until

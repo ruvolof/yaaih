@@ -105,19 +105,15 @@ func TestDescribeWindowTellsTheModelHowToContinue(t *testing.T) {
 // mount boundary itself, which only a real container can provide.
 type containerlessBash struct{}
 
-func (containerlessBash) Execute(ctx context.Context, cmd string) (string, error) {
+func (containerlessBash) Run(ctx context.Context, cmd string) (executor.JobResult, error) {
 	out, _ := osexec.CommandContext(ctx, "bash", "-c", cmd).CombinedOutput()
-	return string(out), nil
+	return executor.JobResult{Output: string(out)}, nil
 }
-
-func (containerlessBash) CWD() string     { return "/" }
-func (containerlessBash) IsRunning() bool { return true }
-func (containerlessBash) Close() error    { return nil }
 
 // bashWorkspace returns a runner backed by the host's bash and a temp dir
 // standing in for the container workspace. The commands target the GNU
 // userland of the runtime container, so only Linux hosts run these tests.
-func bashWorkspace(t *testing.T) (executor.Executor, string) {
+func bashWorkspace(t *testing.T) (executor.Runner, string) {
 	t.Helper()
 	if runtime.GOOS != "linux" {
 		t.Skip("the generated commands target the runtime container's GNU userland")

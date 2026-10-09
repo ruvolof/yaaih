@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ruvolof/yaaih/internal/executor"
 )
@@ -29,6 +30,19 @@ import (
 // command itself printed and takes the last occurrence, so payload bytes that
 // happen to contain the text cannot displace the real status.
 const containerFSMarker = "__HARNESS_FS__"
+
+// containerFSTimeout bounds one filesystem command. They read or write one
+// file, so one that runs this long is stuck — on a hung mount, say — and is
+// killed rather than left in the background.
+const containerFSTimeout = 30 * time.Second
+
+// runContainerFS runs one filesystem command under containerFSTimeout.
+func runContainerFS(ctx context.Context, runner executor.Runner, cmd string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, containerFSTimeout)
+	defer cancel()
+	result, err := runner.Run(ctx, cmd)
+	return result.Output, err
+}
 
 // resolveContainerPath joins rel onto the container workspace root, rejecting
 // absolute paths and lexical escapes via "..". This enforces the tool contract
@@ -117,12 +131,12 @@ func splitContainerFSResult(raw string) (payload, status, detail string, ok bool
 
 // containerFileRead reads lines [offset, offset+limit) of a workspace file
 // through the sandbox and prefixes the page with its describeWindow header.
-func containerFileRead(ctx context.Context, runner executor.Executor, root, rel string, offset, limit int) (string, error) {
+func containerFileRead(ctx context.Context, runner executor.Runner, root, rel string, offset, limit int) (string, error) {
 	containerPath, err := resolveContainerPath(root, rel)
 	if err != nil {
 		return "", err
 	}
-	raw, err := runner.Execute(ctx, fileReadCommand(containerPath, offset, limit))
+	raw, err := runContainerFS(ctx, runner, fileReadCommand(containerPath, offset, limit))
 	if err != nil {
 		return "", err
 	}
@@ -142,12 +156,12 @@ func containerFileRead(ctx context.Context, runner executor.Executor, root, rel 
 
 // containerFileWrite writes content to a workspace file through the sandbox,
 // creating parent directories.
-func containerFileWrite(ctx context.Context, runner executor.Executor, root, rel, content string) (string, error) {
+func containerFileWrite(ctx context.Context, runner executor.Runner, root, rel, content string) (string, error) {
 	containerPath, err := resolveContainerPath(root, rel)
 	if err != nil {
 		return "", err
 	}
-	raw, err := runner.Execute(ctx, fileWriteCommand(containerPath, content))
+	raw, err := runContainerFS(ctx, runner, fileWriteCommand(containerPath, content))
 	if err != nil {
 		return "", err
 	}
@@ -165,12 +179,12 @@ func containerFileWrite(ctx context.Context, runner executor.Executor, root, rel
 }
 
 // containerFileList lists a workspace directory through the sandbox.
-func containerFileList(ctx context.Context, runner executor.Executor, root, rel string) (string, error) {
+func containerFileList(ctx context.Context, runner executor.Runner, root, rel string) (string, error) {
 	containerPath, err := resolveContainerPath(root, rel)
 	if err != nil {
 		return "", err
 	}
-	raw, err := runner.Execute(ctx, fileListCommand(containerPath))
+	raw, err := runContainerFS(ctx, runner, fileListCommand(containerPath))
 	if err != nil {
 		return "", err
 	}

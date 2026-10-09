@@ -44,22 +44,22 @@ func lastToolEntry(m *Model) *chatEntry {
 }
 
 // The reply is drawn under the call it answers even when something else was
-// shown while the call ran — a timeout warning arrives between the two.
+// shown while the call ran — an error arrives between the two.
 func TestToolReplyLandsUnderItsCall(t *testing.T) {
 	m := sizedTestModel(t)
 	m.Update(agent.ToolCallStartMsg{ID: "call-1", Name: "shell_exec", Args: `{"command":"sleep 99"}`})
-	m.Update(agent.TimeoutMsg{Command: "sleep 99", Message: "timed out"})
-	m.Update(agent.ToolCallResultMsg{ID: "call-1", Name: "shell_exec", Result: "error: timed out", Err: "timed out"})
+	m.Update(agent.ErrorMsg{Err: "meanwhile"})
+	m.Update(agent.ToolCallResultMsg{ID: "call-1", Name: "shell_exec", Result: "error: stopped", Err: "stopped"})
 
 	transcript := m.transcript.plainText()
 	call := strings.Index(transcript, "shell_exec")
 	reply := strings.Index(transcript, "✗")
-	warning := strings.Index(transcript, "Command timed out")
+	warning := strings.Index(transcript, "error: meanwhile")
 	if call < 0 || reply < 0 || warning < 0 || !(call < reply && reply < warning) {
 		t.Errorf("want call, reply, then warning; transcript:\n%s", transcript)
 	}
 	if entries := len(m.transcript.entries); entries != 2 {
-		t.Errorf("entries = %d, want the call and the warning", entries)
+		t.Errorf("entries = %d, want the call and the error", entries)
 	}
 }
 

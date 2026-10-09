@@ -58,6 +58,9 @@ type Model struct {
 	ag     *agent.Agent
 	runner executor.Executor // may be nil when no runtime sandbox is up
 	ctx    context.Context
+	events *eventRelay // nil when there is no agent
+	// terminal is the operator's shell in the sandbox; nil without one.
+	terminal *operatorTerminal
 
 	// agentsDir is the directory agents are discovered in (for /agents and
 	// /new <agent>); currentAgent is the selected agent's folder name ("" when
@@ -99,6 +102,11 @@ type Model struct {
 	// under the pointer.
 	selection *textSelection
 	dragging  bool
+
+	// draggingThumb is true from a press on the chat's scrollbar to its
+	// release; thumbGrab is the row of the thumb the pointer holds it by.
+	draggingThumb bool
+	thumbGrab     int
 
 	// busy is true while a turn is in flight (between the user pressing
 	// Enter and the AssistantDoneMsg that ends it). busyFrame advances every
@@ -229,6 +237,10 @@ func New(ctx context.Context, cfg *config.Config, ag *agent.Agent, runner execut
 		m.cwd = cfg.Runtime.Workspace
 	}
 	if ag != nil {
+		m.events = newEventRelay(ag.Events())
+		if shells, ok := runner.(executor.OperatorShells); ok {
+			m.terminal = newOperatorTerminal(ctx, shells, m.events)
+		}
 		// Prime the stats from the agent so a resumed session shows its restored
 		// cost immediately, and a switched-into agent shows the carried-over run
 		// total before the next turn.
@@ -295,18 +307,19 @@ func (m *Model) prefillFromHistory(history []llm.Message) {
 // Init wires up the event-pump subscription. In the agent-less state there is
 // no agent to pump events from, so it does nothing until an agent is selected.
 func (m *Model) Init() tea.Cmd {
-	if m.ag == nil {
-		return nil
-	}
-	return waitForEvent(m.ag.Events())
+	return m.nextEvent()
 }
 
-// waitForEvent returns a tea.Cmd that yields one agent event as a tea.Msg.
-// After every event the Update handler re-subscribes by returning waitForEvent
+// nextEvent returns a tea.Cmd that yields one agent event as a tea.Msg.
+// After every event the Update handler re-subscribes by returning nextEvent
 // again — a classic "tick"-style pump.
-func waitForEvent(ch <-chan agent.Event) tea.Cmd {
+func (m *Model) nextEvent() tea.Cmd {
+	if m.events == nil {
+		return nil
+	}
+	events := m.events.out
 	return func() tea.Msg {
-		ev, ok := <-ch
+		ev, ok := <-events
 		if !ok {
 			return agentClosedMsg{}
 		}
@@ -315,6 +328,9 @@ func waitForEvent(ch <-chan agent.Event) tea.Cmd {
 }
 
 type agentClosedMsg struct{}
+
+// terminalClosedMsg reports the end of a visit to the operator's shell.
+type terminalClosedMsg struct{ err error }
 
 // Update handles keys, window resizes, and agent events.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -332,6 +348,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if handled, cmd := m.dragSelection(msg); handled {
 			return m, cmd
 		}
+		if m.dragScrollbar(msg) {
+			return m, nil
+		}
 		if m.pendingApproval != nil && m.handleApprovalMouse(msg) {
 			return m, nil
 		}
@@ -345,7 +364,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			m.startSelection(msg.X, msg.Y)
+			if !m.grabScrollbar(msg.X, msg.Y) {
+				m.startSelection(msg.X, msg.Y)
+			}
 			return m, nil
 		}
 		// Forward the rest to the chat viewport, which only acts on the wheel.
@@ -368,6 +389,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "ctrl+d":
 			return m, m.quit()
+		case "ctrl+]":
+			if m.terminal == nil {
+				return m, m.setToast("no sandbox to open a shell in")
+			}
+			visit := m.terminal.visit(m.pendingApproval != nil)
+			return m, tea.Exec(visit, func(err error) tea.Msg { return terminalClosedMsg{err: err} })
 		case "esc":
 			// Stop the running turn. The agent unwinds at its next
 			// cancellation point and reports back with a cancelled
@@ -505,11 +532,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.renderTicking = true
 			cmds = append(cmds, renderTick())
 		}
-		cmds = append(cmds, waitForEvent(m.ag.Events()))
+		cmds = append(cmds, m.nextEvent())
 
 	case agent.AssistantMessageMsg:
 		m.commitAssistant()
-		cmds = append(cmds, waitForEvent(m.ag.Events()))
+		cmds = append(cmds, m.nextEvent())
 
 	case agent.AssistantDoneMsg:
 		// A turn that ran to completion has already committed its last message
@@ -525,20 +552,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.busy = false
 		m.cancelTurn = nil
-		cmds = append(cmds, waitForEvent(m.ag.Events()))
+		cmds = append(cmds, m.nextEvent())
 
 	case agent.ToolCallStartMsg:
 		m.startTool(msg.ID, msg.Name, msg.Args)
-		cmds = append(cmds, waitForEvent(m.ag.Events()))
+		cmds = append(cmds, m.nextEvent())
 
 	case agent.ToolCallResultMsg:
 		m.finishTool(msg.ID, msg.Name, msg.Result, msg.Err != "")
-		cmds = append(cmds, waitForEvent(m.ag.Events()))
-
-	case agent.TimeoutMsg:
-		block := styleWarnBlk.Render(fmt.Sprintf("Command timed out\n%s\n%s", msg.Command, msg.Message))
-		m.appendLine(block)
-		cmds = append(cmds, waitForEvent(m.ag.Events()))
+		cmds = append(cmds, m.nextEvent())
 
 	case agent.StatsUpdateMsg:
 		m.sessionStats = msg.Session
@@ -546,17 +568,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cwd = msg.CWD
 		m.noteContextFill(msg.ContextTokens, msg.ContextBudget)
 		m.noteSpend(msg.Session)
-		cmds = append(cmds, waitForEvent(m.ag.Events()))
+		cmds = append(cmds, m.nextEvent())
 
 	case agent.HistoryTrimmedMsg:
 		// Stays in the scrollback rather than in a toast: it explains gaps in
 		// what the model remembers minutes after it scrolls past.
 		m.appendLine(styleMuted.Render(renderHistoryTrimmed(msg)))
-		cmds = append(cmds, waitForEvent(m.ag.Events()))
+		cmds = append(cmds, m.nextEvent())
 
 	case agent.ApprovalRequestMsg:
 		m.openApproval(msg.Request)
-		cmds = append(cmds, waitForEvent(m.ag.Events()))
+		cmds = append(cmds, m.nextEvent())
+
+	case terminalClosedMsg:
+		if msg.err != nil {
+			m.appendLine(styleErr.Render("operator shell: " + msg.err.Error()))
+		}
 
 	case agent.ErrorMsg:
 		// Reporting only. What ends a turn — and with it the busy indicator and
@@ -565,7 +592,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// a turn is running (a rejected second message) must leave the running
 		// turn's UI alone.
 		m.appendLine(styleErr.Render("error: " + msg.Err))
-		cmds = append(cmds, waitForEvent(m.ag.Events()))
+		cmds = append(cmds, m.nextEvent())
 
 	case toastExpiredMsg:
 		// Only clear if no fresher toast has replaced this one.
@@ -616,10 +643,10 @@ func (m *Model) View() string {
 	sidebarW := m.sidebarWidth()
 	mainH := m.mainHeight()
 
-	chatBox := styleChatBorder.
+	chatBox := m.drawChatScrollbar(styleChatBorder.
 		Width(m.chatBoxWidth()).
 		Height(mainH).
-		Render(m.chatView())
+		Render(m.chatView()))
 
 	sidebar := styleSidebarBorder.
 		Width(sidebarW).
@@ -884,9 +911,9 @@ func (m *Model) refuseIfBusy(cmd string) bool {
 // go through here: they differ in what they ask the model, not in how the UI
 // has to behave while they wait for it.
 //
-// Do NOT queue a waitForEvent alongside the returned command. The consumer
+// Do NOT queue a nextEvent alongside the returned command. The consumer
 // chain started in Init() already keeps exactly one reader blocked on the event
-// channel at all times, each handler in Update returning the next waitForEvent.
+// channel at all times, each handler in Update returning the next nextEvent.
 // A second reader would race it: two goroutines blocked on the same channel
 // hand their events to bubbletea in goroutine-completion order rather than
 // arrival order, and streamed text renders scrambled.
@@ -1187,6 +1214,9 @@ func (m *Model) renderSidebar() string {
 	if m.runner != nil {
 		fmt.Fprintln(&b, "docker")
 		fmt.Fprintln(&b, styleMuted.Render(truncate(m.cwd, 26)))
+		if running := runningJobs(m.runner); running > 0 {
+			fmt.Fprintln(&b, styleAccent(fmt.Sprintf("jobs running: %d", running)))
+		}
 	} else {
 		fmt.Fprintln(&b, styleMuted.Render("—"))
 	}
@@ -1220,14 +1250,6 @@ func (m *Model) renderSidebar() string {
 		fmt.Fprintln(&b, styleMuted.Render("$ N/A"))
 	}
 	fmt.Fprintln(&b)
-	fmt.Fprintln(&b, styleHeader.Render("Scroll"))
-	if m.userScrolled {
-		fmt.Fprintln(&b, styleAccent(fmt.Sprintf("↑ %d%% (^end ↓)",
-			int(m.chat.ScrollPercent()*100))))
-	} else {
-		fmt.Fprintln(&b, styleMuted.Render("at bottom"))
-	}
-	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, styleHeader.Render("Keys"))
 	if m.toast != "" {
 		fmt.Fprintln(&b, styleOK.Render(truncate(m.toast, 26)))
@@ -1238,12 +1260,27 @@ func (m *Model) renderSidebar() string {
 	fmt.Fprintln(&b, styleMuted.Render("^t copy chat"))
 	fmt.Fprintln(&b, styleMuted.Render("^o/click expand tool"))
 	fmt.Fprintln(&b, styleMuted.Render("alt+↑/↓ select tool"))
+	if m.terminal != nil {
+		fmt.Fprintln(&b, styleMuted.Render("^] sandbox shell"))
+	}
 	fmt.Fprintln(&b, styleMuted.Render("pgup/pgdn scroll"))
 	fmt.Fprintln(&b, styleMuted.Render("^home/^end top/btm"))
 	fmt.Fprintln(&b, styleMuted.Render("wheel  scroll"))
 	fmt.Fprintln(&b, styleMuted.Render("/exit  quit (or /help)"))
 	fmt.Fprintln(&b, styleMuted.Render("^c quit"))
 	return b.String()
+}
+
+// runningJobs counts the sandbox's shell jobs still running: ones the model
+// left in the background keep holding the sandbox's processes after the turn.
+func runningJobs(runner executor.Executor) int {
+	running := 0
+	for _, job := range runner.Jobs() {
+		if job.Running {
+			running++
+		}
+	}
+	return running
 }
 
 // renderApprovalStanding is the sidebar's account of what runs without asking.

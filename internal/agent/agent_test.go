@@ -67,26 +67,42 @@ func toolCallResponse(id, name, args string) *llm.ChatResponse {
 }
 
 // stubRunner stands in for the sandbox executor and counts what reached it.
-// output, when set, is what every command returns.
+// output, when set, is what every command returns; every command finishes at
+// once.
 type stubRunner struct {
 	mu       sync.Mutex
 	commands []string
 	output   string
 }
 
-func (r *stubRunner) Execute(ctx context.Context, cmd string) (string, error) {
+func (r *stubRunner) Start(ctx context.Context, cmd string, wait time.Duration) (executor.JobResult, error) {
+	return r.Run(ctx, cmd)
+}
+
+func (r *stubRunner) Run(ctx context.Context, cmd string) (executor.JobResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.commands = append(r.commands, cmd)
-	if r.output != "" {
-		return r.output, nil
+	output := r.output
+	if output == "" {
+		output = "stub output"
 	}
-	return "stub output", nil
+	return executor.JobResult{ID: len(r.commands), Output: output, StateKept: true}, nil
 }
 
-func (r *stubRunner) CWD() string     { return "/workspace" }
-func (r *stubRunner) IsRunning() bool { return true }
-func (r *stubRunner) Close() error    { return nil }
+func (r *stubRunner) Wait(ctx context.Context, id int, wait time.Duration) (executor.JobResult, error) {
+	return executor.JobResult{ID: id}, nil
+}
+
+func (r *stubRunner) Kill(ctx context.Context, id int) (executor.JobResult, error) {
+	return executor.JobResult{ID: id, ExitCode: -1}, nil
+}
+
+func (r *stubRunner) Jobs() []executor.JobInfo         { return nil }
+func (r *stubRunner) TakeFinished() []executor.JobInfo { return nil }
+func (r *stubRunner) CWD() string                      { return "/workspace" }
+func (r *stubRunner) IsRunning() bool                  { return true }
+func (r *stubRunner) Close() error                     { return nil }
 
 func (r *stubRunner) executed() []string {
 	r.mu.Lock()

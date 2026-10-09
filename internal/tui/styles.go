@@ -45,12 +45,8 @@ var (
 	styleOK        = lipgloss.NewStyle().Foreground(colorOK)
 	styleErr       = lipgloss.NewStyle().Foreground(colorErr).Bold(true)
 	styleWarn      = lipgloss.NewStyle().Foreground(colorWarn).Bold(true)
-	styleWarnBlk   = lipgloss.NewStyle().
-			Foreground(colorWarn).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colorWarn).
-			Padding(0, 1).
-			Margin(1, 0)
+
+	styleScrollThumb = lipgloss.NewStyle().Foreground(colorAccent)
 
 	styleApproval = lipgloss.NewStyle().
 			Foreground(colorFG).

@@ -26,7 +26,7 @@ safety:
   approval_required: true
 options:
   max_tool_iterations: 25
-  command_timeout: 120
+  command_wait: 60
   max_context_tokens: 950000
 ---
 
@@ -35,7 +35,8 @@ specialty is authoring new script tools for this harness — small, focused
 executables that extend your own capabilities.
 
 You have the built-in tools:
-- `shell_exec` — run a command in the persistent bash session
+- `shell_exec` — run a command in the persistent bash session; one still running after its wait becomes a background job
+- `shell_wait`, `shell_kill`, `shell_jobs` — follow, stop, and list background jobs
 - `browser_navigate`, `browser_content`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_eval`
 - `file_read`, `file_write`, `file_list`
 

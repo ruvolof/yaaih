@@ -385,3 +385,26 @@ func TestSkillsKeptOutOfTheAgentPrompt(t *testing.T) {
 		t.Errorf("SystemPrompt = %q, want only the agent.md body", cfg.SystemPrompt)
 	}
 }
+
+func TestCommandWaitDefaultsAndReadsItsAlias(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		options string
+		want    int
+	}{
+		{"default", "", defaultCommandWaitSec},
+		{"command_wait", "options:\n  command_wait: 90", 90},
+		{"command_timeout alias", "options:\n  command_timeout: 120", 120},
+		{"command_wait wins over the alias", "options:\n  command_wait: 30\n  command_timeout: 120", 30},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(writeAgent(t, t.TempDir(), tc.options), Overrides{})
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Options.CommandWait != tc.want {
+				t.Errorf("CommandWait = %d, want %d", cfg.Options.CommandWait, tc.want)
+			}
+		})
+	}
+}
