@@ -197,7 +197,7 @@ func TestStreamChatReassemblesSplitToolCalls(t *testing.T) {
 }
 
 // Cost is the only budget signal the harness gets, and it rides in the same
-// usage block as the token counts rather than a field openai-go knows about.
+// usage block as the token counts, as a field only OpenRouter sends.
 func TestOpenRouterCostIsReadFromTheUsageChunk(t *testing.T) {
 	const usageWithCost = `data: {"id":"stub","object":"chat.completion.chunk","model":"stub",` +
 		`"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18,` +

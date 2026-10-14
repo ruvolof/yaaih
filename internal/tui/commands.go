@@ -313,6 +313,27 @@ func init() {
 		},
 	})
 	registerCommand(&Command{
+		Name:        "spawn",
+		Description: "Hand off to a new session that starts on <task>, briefed from this one.",
+		Handler: func(m *Model, args string) tea.Cmd {
+			if !m.requireAgent("spawn") {
+				return nil
+			}
+			task := strings.TrimSpace(args)
+			if task == "" {
+				m.appendLine(styleErr.Render("usage: /spawn <task>"))
+				return nil
+			}
+			if m.refuseIfBusy("spawn") {
+				return nil
+			}
+			ag := m.ag
+			return m.startTurn(func(turnCtx context.Context) {
+				ag.Spawn(turnCtx, task)
+			})
+		},
+	})
+	registerCommand(&Command{
 		Name:        "skills",
 		Description: "List the agent's skills and which are loaded.",
 		Handler: func(m *Model, args string) tea.Cmd {

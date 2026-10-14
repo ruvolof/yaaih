@@ -186,3 +186,18 @@ func TestSkillCommandReportsWhatItCannotDo(t *testing.T) {
 		t.Errorf("/skill during a turn = %q, want it refused as busy", got)
 	}
 }
+
+func TestSpawnCommandReportsWhatItCannotDo(t *testing.T) {
+	model := newSkilledTestModel(t)
+
+	if got := runCommand(t, model, "spawn", "  "); !strings.Contains(got, "usage: /spawn <task>") {
+		t.Errorf("/spawn with no task = %q, want usage", got)
+	}
+	model.busy = true
+	if got := runCommand(t, model, "spawn", "write a rollback plan"); !strings.Contains(got, "busy") {
+		t.Errorf("/spawn during a turn = %q, want it refused as busy", got)
+	}
+	if got := runCommand(t, &Model{}, "spawn", "write a rollback plan"); !strings.Contains(got, "no agent selected") {
+		t.Errorf("/spawn without an agent = %q, want it to point at the agent picker", got)
+	}
+}

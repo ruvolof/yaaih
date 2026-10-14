@@ -5,13 +5,15 @@ package tui
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"io"
+	"os"
 	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
-	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -23,6 +25,7 @@ import (
 	"github.com/ruvolof/yaaih/internal/governor"
 	"github.com/ruvolof/yaaih/internal/llm"
 	"github.com/ruvolof/yaaih/internal/logging"
+	"github.com/ruvolof/yaaih/internal/session"
 )
 
 var log = logging.For("tui")
@@ -32,8 +35,21 @@ var log = logging.For("tui")
 // the receiving app gets plain text.
 var ansiCSI = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
-// writeClipboard puts text on the system clipboard.
-var writeClipboard = clipboard.WriteAll
+// writeClipboard puts text on the system clipboard. It writes straight to the
+// terminal rather than through the program, in a single write so it cannot
+// split a frame the renderer is flushing.
+var writeClipboard = func(text string) error {
+	_, err := io.WriteString(os.Stdout, osc52(text))
+	return err
+}
+
+// osc52 is the escape sequence asking the terminal to set the system
+// clipboard. The terminal owns the clipboard, so copying needs no helper
+// program and works over SSH; a terminal without OSC 52 support, or tmux
+// without set-clipboard on, drops the sequence without a word.
+func osc52(text string) string {
+	return "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\a"
+}
 
 // toastTTL is how long a "copied!" hint lingers in the sidebar before clearing.
 const toastTTL = 2 * time.Second
@@ -269,8 +285,9 @@ func (m *Model) SwitchTarget() string { return m.switchTo }
 func (m *Model) SwitchResume() string { return m.switchResume }
 
 // prefillFromHistory renders a restored conversation into the chat buffer,
-// approximating how the live turn loop renders each message kind. The system
-// message is not shown. Does nothing when there is no prior conversation.
+// approximating how the live turn loop renders each message kind. System
+// messages are not shown, except the briefing a spawned session opened with.
+// Does nothing when there is no prior conversation.
 func (m *Model) prefillFromHistory(history []llm.Message) {
 	hasConversation := false
 	for _, msg := range history {
@@ -286,6 +303,14 @@ func (m *Model) prefillFromHistory(history []llm.Message) {
 	m.appendLine(styleMuted.Render("↻ resumed previous session"))
 	for _, msg := range history {
 		switch msg.Role {
+		case llm.RoleSystem:
+			if briefing, ok := agent.SpawnBriefing(msg); ok {
+				var parent, child session.ID
+				if m.ag != nil {
+					parent, child = m.ag.SessionParent(), m.ag.CurrentSession()
+				}
+				m.showSpawnedSession(parent, child, briefing)
+			}
 		case llm.RoleUser:
 			m.appendLine(styleUser.Render("You: ") + msg.Content)
 		case llm.RoleAssistant:
@@ -574,6 +599,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Stays in the scrollback rather than in a toast: it explains gaps in
 		// what the model remembers minutes after it scrolls past.
 		m.appendLine(styleMuted.Render(renderHistoryTrimmed(msg)))
+		cmds = append(cmds, m.nextEvent())
+
+	case agent.SessionSpawnedMsg:
+		// The briefing streamed into the old session's chat; the new session's
+		// chat opens with it instead. The turn on the task is still running.
+		m.resetChat()
+		m.showSpawnedSession(msg.Parent, msg.Child, msg.Briefing)
+		m.appendLine(styleUser.Render("You: ") + msg.Task)
+		m.sessionStats = m.ag.SessionStats()
+		m.globalStats = m.ag.GlobalStats()
 		cmds = append(cmds, m.nextEvent())
 
 	case agent.ApprovalRequestMsg:
@@ -1226,6 +1261,11 @@ func (m *Model) renderSidebar() string {
 		fmt.Fprintln(&b)
 	}
 	fmt.Fprintln(&b, styleHeader.Render("Session"))
+	if m.ag != nil {
+		if parent := m.ag.SessionParent(); parent != "" {
+			fmt.Fprintln(&b, styleMuted.Render(truncate("from "+string(parent), 26)))
+		}
+	}
 	fmt.Fprintf(&b, "in:  %d\n", m.sessionStats.TotalInputTokens)
 	fmt.Fprintf(&b, "out: %d\n", m.sessionStats.TotalOutputTokens)
 	fmt.Fprint(&b, renderSessionSpend(m.sessionStats))
@@ -1392,6 +1432,27 @@ func (m *Model) noteSpend(stats governor.Stats) {
 			"⚠ provider.max_session_cost_usd is $%.2f, but this provider reports no cost, so it cannot be enforced — set provider.max_session_tokens to cap the session",
 			stats.Limits.MaxCostUSD)))
 	}
+}
+
+// showSpawnedSession opens the chat of a spawned session the way it began:
+// where it came from, then the briefing it was handed, if there was one.
+func (m *Model) showSpawnedSession(parent, child session.ID, briefing string) {
+	m.appendLine(styleMuted.Render(renderSessionSpawned(parent, child)))
+	if briefing != "" {
+		m.appendLine(styleMuted.Render("Briefing:"))
+		m.appendReply(briefing)
+	}
+}
+
+func renderSessionSpawned(parent, child session.ID) string {
+	line := "✦ spawned session"
+	if child != "" {
+		line += " " + string(child)
+	}
+	if parent != "" {
+		line += " from " + string(parent)
+	}
+	return line
 }
 
 // renderHistoryTrimmed describes what left the conversation, in the terms that

@@ -4,7 +4,6 @@
 package config
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -13,12 +12,9 @@ import (
 	"strings"
 
 	"github.com/docker/go-units"
-	"github.com/yuin/goldmark"
-	"github.com/yuin/goldmark/parser"
-	"github.com/yuin/goldmark/text"
-	"go.abhg.dev/goldmark/frontmatter"
 
 	"github.com/ruvolof/yaaih/internal/docker"
+	"github.com/ruvolof/yaaih/internal/frontmatter"
 	"github.com/ruvolof/yaaih/internal/logging"
 	"github.com/ruvolof/yaaih/internal/skills"
 )
@@ -233,26 +229,16 @@ func Load(path string, ov Overrides) (*Config, error) {
 		return nil, fmt.Errorf("read agent file: %w", err)
 	}
 
-	md := goldmark.New(
-		goldmark.WithExtensions(&frontmatter.Extender{}),
-	)
-	ctx := parser.NewContext()
-	doc := md.Parser().Parse(text.NewReader(raw), parser.WithContext(ctx))
-
-	fm := frontmatter.Get(ctx)
-	if fm == nil {
+	cfg := &Config{}
+	body, err := frontmatter.Parse(raw, cfg)
+	if errors.Is(err, frontmatter.ErrMissing) {
 		return nil, errors.New("agent.md is missing YAML frontmatter")
 	}
-
-	cfg := &Config{}
-	if err := fm.Decode(cfg); err != nil {
-		return nil, fmt.Errorf("decode frontmatter: %w", err)
+	if err != nil {
+		return nil, err
 	}
-
-	// Extract the Markdown body (everything after the frontmatter block).
-	cfg.SystemPrompt = strings.TrimSpace(extractBody(raw))
+	cfg.SystemPrompt = strings.TrimSpace(body)
 	cfg.SourcePath = abs
-	_ = doc // doc retained only to anchor ctx; goldmark API does not expose body directly
 
 	// Resolve paths: CLI overrides win over agent.md values, which win over
 	// defaults. Overrides are taken relative to CWD; agent.md values and
@@ -354,29 +340,6 @@ func resolveAgentFile(path string) (string, error) {
 		return md, nil
 	}
 	return abs, nil
-}
-
-// extractBody returns the raw Markdown content after the closing `---` of the
-// YAML frontmatter. If no frontmatter delimiters are found, the whole input is
-// returned (Load's caller will already have failed on missing frontmatter).
-func extractBody(raw []byte) string {
-	open := []byte("---")
-	if !bytes.HasPrefix(raw, open) {
-		return string(raw)
-	}
-	// Skip the opening delimiter line.
-	rest := raw[len(open):]
-	// Find the closing delimiter.
-	idx := bytes.Index(rest, []byte("\n---"))
-	if idx < 0 {
-		return string(raw)
-	}
-	body := rest[idx+len("\n---"):]
-	// Drop the rest of the closing line.
-	if nl := bytes.IndexByte(body, '\n'); nl >= 0 {
-		body = body[nl+1:]
-	}
-	return string(body)
 }
 
 func applyDefaults(c *Config) {

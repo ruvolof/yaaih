@@ -45,6 +45,14 @@ func captureClipboard(t *testing.T) *string {
 	return &copied
 }
 
+func TestOSC52EncodesTextForTheTerminal(t *testing.T) {
+	got := osc52("héllo\nworld")
+	want := "\x1b]52;c;aMOpbGxvCndvcmxk\a"
+	if got != want {
+		t.Errorf("osc52 = %q, want %q", got, want)
+	}
+}
+
 // lineOf is the first chat line whose text contains needle.
 func lineOf(t *testing.T, m *Model, needle string) int {
 	t.Helper()

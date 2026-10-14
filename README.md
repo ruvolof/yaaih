@@ -255,6 +255,14 @@ the earlier conversation with a summary, at the cost of one extra model call.
 The sidebar shows how full the context is, and the conversation warns you at
 85%.
 
+**Spawning.** `/spawn <task>` hands the work over to a new session of the same
+agent. One model call writes a briefing of the current conversation that keeps
+only what the task needs. The new session opens with that briefing and starts
+on the task straight away. It shares the shell, the workspace, the background
+jobs and the loaded skills. It does not inherit the conversation, standing
+approvals or the session's spend. The old session is closed but can still be
+resumed, and the sidebar names it.
+
 ## Using the TUI
 
 ### Flags
@@ -280,6 +288,7 @@ The sidebar shows how full the context is, and the conversation warns you at
 | `/skills`, `/skill <name>` | List skills; load one |
 | `/reload` | Reload script tools |
 | `/compact [focus]` | Summarise the earlier conversation |
+| `/spawn <task>` | Hand off to a new session that starts on the task, briefed from this one |
 | `/exit` | Quit (also Ctrl+C) |
 
 ### Keys
@@ -296,6 +305,10 @@ The sidebar shows how full the context is, and the conversation warns you at
 | Ctrl+Y with nothing selected | Copy the last reply as Markdown |
 | Ctrl+T | Copy the whole conversation |
 | Ctrl+] | Switch between the chat and a shell in the sandbox (see below) |
+
+Copying goes through the terminal (OSC 52), so it needs no clipboard tool and
+works over SSH. Most modern terminals support it; inside tmux it needs
+`set -g set-clipboard on`.
 
 **The sandbox shell.** Ctrl+] hands the whole terminal to an interactive bash
 inside the sandbox, and Ctrl+] again brings the chat back. The shell starts in

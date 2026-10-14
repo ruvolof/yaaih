@@ -5,6 +5,7 @@ package agent
 
 import (
 	"github.com/ruvolof/yaaih/internal/governor"
+	"github.com/ruvolof/yaaih/internal/session"
 )
 
 // AssistantDeltaMsg is one streamed content chunk from the model.
@@ -66,6 +67,16 @@ type HistoryTrimmedMsg struct {
 	BeforeTokens    int
 	AfterTokens     int
 	Summarised      bool
+}
+
+// SessionSpawnedMsg reports that /spawn has handed off to a new session: the
+// conversation is now Child's, opened with Briefing and about to work on Task.
+// Parent is empty when the session it came from was not persisted.
+type SessionSpawnedMsg struct {
+	Parent   session.ID
+	Child    session.ID
+	Briefing string
+	Task     string
 }
 
 // ApprovalRequestMsg asks the operator to permit a restricted tool call.

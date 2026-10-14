@@ -14,6 +14,7 @@ import (
 	"github.com/ruvolof/yaaih/internal/agent"
 	"github.com/ruvolof/yaaih/internal/config"
 	"github.com/ruvolof/yaaih/internal/governor"
+	"github.com/ruvolof/yaaih/internal/llm"
 	"github.com/ruvolof/yaaih/internal/session"
 )
 
@@ -385,5 +386,100 @@ func TestSidebarScrollsOnAShortTerminal(t *testing.T) {
 	}
 	if scrolled := m.sidebarScroll; scrolled == 0 {
 		t.Error("the wheel over the conversation scrolled the sidebar back")
+	}
+}
+
+// The briefing streams into the old session's chat; once the handoff happens
+// the chat is the new session's, and the turn on the task is still running.
+func TestSpawnedSessionReplacesTheChat(t *testing.T) {
+	m := newTestModel(t)
+	m.busy = true
+	m.cancelTurn = func() {}
+	m.appendLine("You: deploy staging")
+	m.Update(agent.AssistantDeltaMsg{Text: "Staging is deployed."})
+
+	m.Update(agent.SessionSpawnedMsg{
+		Parent:   "parent-session",
+		Child:    "child-session",
+		Briefing: "Staging is deployed.",
+		Task:     "write a rollback plan",
+	})
+
+	chat := stripANSI(m.transcript.plainText())
+	if strings.Contains(chat, "deploy staging") {
+		t.Errorf("chat = %q, want the old session's conversation gone", chat)
+	}
+	for _, want := range []string{"spawned session child-session from parent-session", "Staging is deployed.", "You: write a rollback plan"} {
+		if !strings.Contains(chat, want) {
+			t.Errorf("chat = %q, want it to contain %q", chat, want)
+		}
+	}
+	if !m.busy || m.cancelTurn == nil {
+		t.Error("the handoff ended the turn that is about to work on the task")
+	}
+}
+
+// The briefing is all the operator has of the conversation the session came
+// from, so a resumed session shows it where the live spawn did.
+func TestResumedSpawnedSessionShowsItsBriefing(t *testing.T) {
+	cfg := &config.Config{
+		Model:        "stub-model",
+		SystemPrompt: "you are a test agent",
+		Runtime:      config.RuntimeCfg{Workspace: t.TempDir()},
+	}
+	seed := session.Transcript{
+		Header: session.Header{Parent: "parent-session", Task: "write a rollback plan"},
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: "you are a test agent"},
+			agent.SpawnBriefingMessage("parent-session", "Staging is deployed."),
+			{Role: llm.RoleUser, Content: "write a rollback plan"},
+			{Role: llm.RoleAssistant, Content: "Plan written."},
+		},
+	}
+	ag := agent.New(cfg, nil, governor.New(cfg.Model), governor.New(cfg.Model),
+		nil, nil, agent.NewGatekeeper(false), nil, seed, t.TempDir())
+	t.Cleanup(ag.Close)
+	m := newTestModel(t)
+	m.ag = ag
+
+	m.prefillFromHistory(ag.History())
+
+	chat := stripANSI(m.transcript.plainText())
+	previous := -1
+	for _, want := range []string{"from parent-session", "Briefing:", "Staging is deployed.", "You: write a rollback plan", "Plan written."} {
+		at := strings.Index(chat, want)
+		if at < 0 {
+			t.Fatalf("chat = %q, want it to contain %q", chat, want)
+		}
+		if at < previous {
+			t.Errorf("chat = %q, want %q after what precedes it in the session", chat, want)
+		}
+		previous = at
+	}
+	if strings.Contains(chat, "Briefing handed over") {
+		t.Errorf("chat = %q, want the briefing without the heading meant for the model", chat)
+	}
+}
+
+func TestSidebarNamesTheSessionASpawnCameFrom(t *testing.T) {
+	cfg := &config.Config{
+		Model:        "stub-model",
+		SystemPrompt: "you are a test agent",
+		Runtime:      config.RuntimeCfg{Workspace: t.TempDir()},
+	}
+	seed := session.Transcript{
+		Header:   session.Header{Parent: "parent-session"},
+		Messages: []llm.Message{{Role: llm.RoleSystem, Content: "you are a test agent"}},
+	}
+	ag := agent.New(cfg, nil, governor.New(cfg.Model), governor.New(cfg.Model),
+		nil, nil, agent.NewGatekeeper(false), nil, seed, t.TempDir())
+	t.Cleanup(ag.Close)
+	m := &Model{ag: ag}
+
+	if sidebar := stripANSI(m.renderSidebar()); !strings.Contains(sidebar, "from parent-session") {
+		t.Errorf("sidebar = %q, want it to name the parent session", sidebar)
+	}
+	if sidebar := stripANSI(newTestModel(t).renderSidebar()); strings.Contains(sidebar, "from ") {
+		t.Errorf("sidebar = %q, want no lineage for a session that was not spawned", sidebar)
 	}
 }

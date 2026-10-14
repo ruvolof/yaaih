@@ -601,3 +601,37 @@ func TestWithSystemPrompt(t *testing.T) {
 		})
 	}
 }
+
+func TestHeaderRecordsLineageOnlyForASpawnedSession(t *testing.T) {
+	base := t.TempDir()
+	plainID, spawnedID := ID("20260605-101122-pln1"), ID("20260605-101123-spn1")
+
+	plain, err := NewWriter(base, testHeader(plainID))
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	_ = plain.Close("clean")
+	spawnedHeader := testHeader(spawnedID)
+	spawnedHeader.Parent = plainID
+	spawnedHeader.Task = "write a rollback plan"
+	spawned, err := NewWriter(base, spawnedHeader)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	_ = spawned.Close("clean")
+
+	raw, err := os.ReadFile(filepath.Join(base, string(plainID)+".jsonl"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if first := splitLines(string(raw))[0]; strings.Contains(first, "parent") || strings.Contains(first, "task") {
+		t.Errorf("plain header = %s, want no lineage fields", first)
+	}
+	hdr, _, _, err := Load(base, spawnedID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if hdr.Parent != plainID || hdr.Task != "write a rollback plan" {
+		t.Errorf("spawned header = %+v, want its parent and task", hdr)
+	}
+}

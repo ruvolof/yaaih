@@ -43,6 +43,7 @@ func (StatsUpdateMsg) isAgentEvent()      {}
 func (ApprovalRequestMsg) isAgentEvent()  {}
 func (HistoryTrimmedMsg) isAgentEvent()   {}
 func (ErrorMsg) isAgentEvent()            {}
+func (SessionSpawnedMsg) isAgentEvent()   {}
 
 // Agent owns the conversation state.
 type Agent struct {
@@ -86,6 +87,10 @@ type Agent struct {
 	writer      *session.Writer
 	seq         int64
 	sessionsDir string
+
+	// header is the current session's header, kept for its lineage: the
+	// session it was spawned from, if any. Guarded by mu.
+	header session.Header
 
 	// events carries the agent's output to the TUI. Everything that writes to
 	// it goes through publish, which holds eventsMu in read mode; Close takes
@@ -132,6 +137,7 @@ func New(
 	}
 	if len(seed.Messages) > 0 {
 		// Resumed: the seed is already on disk; continue numbering after it.
+		a.header = seed.Header
 		a.loadedSkills = a.adoptLoadedSkills(seed.Skills)
 		var promptChanged bool
 		a.messages, promptChanged = withCurrentSystemPrompt(seed.Messages, a.systemPrompt())
@@ -207,6 +213,14 @@ func (a *Agent) currentWriter() *session.Writer {
 	return a.writer
 }
 
+// SessionParent is the session the current one was spawned from, or "" when it
+// was not spawned.
+func (a *Agent) SessionParent() session.ID {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.header.Parent
+}
+
 // SessionsDir is the directory where this agent's session files are stored.
 func (a *Agent) SessionsDir() string { return a.sessionsDir }
 
@@ -231,15 +245,30 @@ func (a *Agent) NewSession() (session.ID, error) {
 	}
 	defer a.turnMu.Unlock()
 
-	id := session.NewID()
-	w, err := session.NewWriter(a.sessionsDir, a.headerFor(id))
+	id, err := a.startSession("", "", nil, "switched")
+	if err != nil {
+		return "", err
+	}
+	log.Info("started new session", "id", id)
+	return id, nil
+}
+
+// startSession finalises the current session with closeReason and opens a
+// fresh one, seeded with the system prompt composed with skills. parent and
+// task record where a spawned session came from; both are empty otherwise.
+// The current session is left untouched when the new file cannot be created.
+// The caller holds turnMu.
+func (a *Agent) startSession(parent session.ID, task string, skills []string, closeReason string) (session.ID, error) {
+	header := a.headerFor(session.NewID())
+	header.Parent = parent
+	header.Task = task
+	w, err := session.NewWriter(a.sessionsDir, header)
 	if err != nil {
 		return "", fmt.Errorf("create session: %w", err)
 	}
-	a.closeWriter("switched")
-	a.resetConversation(w, session.Transcript{})
-	log.Info("started new session", "id", id)
-	return id, nil
+	a.closeWriter(closeReason)
+	a.resetConversation(w, session.Transcript{Header: header, Skills: skills})
+	return header.ID, nil
 }
 
 // ResumeSession finalises the current session and loads the one named by id,
@@ -314,18 +343,19 @@ func (a *Agent) closeWriter(reason string) {
 }
 
 // resetConversation replaces the conversation history, the loaded skills, the
-// session writer, and the sequence counter. With an empty seed it starts fresh
-// from the system prompt, with no skills loaded, and persists it as the first
-// entry; otherwise it adopts seed (already on disk) and the skills it had
-// loaded under the current system prompt and continues numbering after it.
+// session header and writer, and the sequence counter. With no seed messages it
+// starts fresh from the system prompt composed with seed's skills and persists
+// it as the first entry; otherwise it adopts seed (already on disk) and the
+// skills it had loaded under the current system prompt and continues numbering
+// after it.
 func (a *Agent) resetConversation(w *session.Writer, seed session.Transcript) {
-	promptChanged := false
-	var loaded []string
-	if len(seed.Messages) > 0 {
-		loaded = a.adoptLoadedSkills(seed.Skills)
-	}
+	loaded := a.adoptLoadedSkills(seed.Skills)
+	// A fresh conversation that opens with skills loaded records them the way
+	// loading one does, so resuming it brings them back.
+	promptChanged := len(seed.Messages) == 0 && len(loaded) > 0
 	prompt := a.composeSystemPrompt(loaded)
 	a.mu.Lock()
+	a.header = seed.Header
 	a.loadedSkills = loaded
 	if len(seed.Messages) > 0 {
 		a.messages, promptChanged = withCurrentSystemPrompt(seed.Messages, prompt)
@@ -430,6 +460,27 @@ func (a *Agent) recordUsage(m llm.Message, usage *session.Usage) {
 	a.persist(m, usage)
 }
 
+// chargeUsage records one model call's usage against both the session-scoped
+// and the run-scoped governors.
+func (a *Agent) chargeUsage(usage llm.TokenUsage) {
+	a.gov.Record(usage)
+	a.globGov.Record(usage)
+	if usage.CostAvailable {
+		a.gov.AddCost(usage.Cost)
+		a.globGov.AddCost(usage.Cost)
+	}
+}
+
+// sessionUsage is usage as the session file records it.
+func sessionUsage(usage llm.TokenUsage) *session.Usage {
+	return &session.Usage{
+		InputTokens:   usage.InputTokens,
+		OutputTokens:  usage.OutputTokens,
+		Cost:          usage.Cost,
+		CostAvailable: usage.CostAvailable,
+	}
+}
+
 // persist writes one message to the session file, assigning the next sequence
 // number. No-op when persistence is disabled.
 func (a *Agent) persist(m llm.Message, usage *session.Usage) {
@@ -499,6 +550,13 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 		}
 	}()
 
+	a.runTurn(ctx, userText, &turnEnd)
+}
+
+// runTurn is the body of a turn: it records userText and loops through model
+// calls and tool calls until the model answers without any. The caller holds
+// turnMu and publishes turnEnd once runTurn returns, whichever path it took.
+func (a *Agent) runTurn(ctx context.Context, userText string, turnEnd *AssistantDoneMsg) {
 	a.record(llm.Message{Role: llm.RoleUser, Content: userText})
 	log.Info("turn start", "user_msg_len", len(userText), "history_msgs", a.messageCount())
 
@@ -509,7 +567,7 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 
 	for iter := 0; iter < maxIter; iter++ {
 		if ctx.Err() != nil {
-			a.endCancelled(&turnEnd, nil)
+			a.endCancelled(turnEnd, nil)
 			return
 		}
 		// Checked before each request rather than after each response: here
@@ -558,20 +616,14 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 				if streamed != "" {
 					a.record(llm.Message{Role: llm.RoleAssistant, Content: streamed})
 				}
-				a.endCancelled(&turnEnd, nil)
+				a.endCancelled(turnEnd, nil)
 				return
 			}
 			log.Error("LLM call failed", "err", err, "iter", iter+1)
 			a.publish(ErrorMsg{Err: fmt.Sprintf("llm error: %v", err)})
 			return
 		}
-		// Record usage into both the session-scoped and run-scoped governors.
-		a.gov.Record(resp.Usage)
-		a.globGov.Record(resp.Usage)
-		if resp.Usage.CostAvailable {
-			a.gov.AddCost(resp.Usage.Cost)
-			a.globGov.AddCost(resp.Usage.Cost)
-		}
+		a.chargeUsage(resp.Usage)
 		a.calibrate(contextStats.AfterTokens, resp.Usage.InputTokens)
 		a.publish(a.statsUpdate(a.promptTokens(contextStats, resp.Usage.InputTokens)))
 
@@ -581,12 +633,7 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 			Role:      llm.RoleAssistant,
 			Content:   resp.Content,
 			ToolCalls: resp.ToolCalls,
-		}, &session.Usage{
-			InputTokens:   resp.Usage.InputTokens,
-			OutputTokens:  resp.Usage.OutputTokens,
-			Cost:          resp.Usage.Cost,
-			CostAvailable: resp.Usage.CostAvailable,
-		})
+		}, sessionUsage(resp.Usage))
 
 		a.publish(AssistantMessageMsg{})
 
@@ -615,7 +662,7 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 		// Execute tool calls and append their results.
 		for idx, tc := range resp.ToolCalls {
 			if ctx.Err() != nil {
-				a.endCancelled(&turnEnd, resp.ToolCalls[idx:])
+				a.endCancelled(turnEnd, resp.ToolCalls[idx:])
 				return
 			}
 			a.publish(ToolCallStartMsg{ID: tc.ID, Name: tc.Name, Args: tc.Arguments})
@@ -637,7 +684,7 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 				decision, err := a.gate.Request(ctx, tc.Name, prettyJSON(tc.Arguments))
 				if err != nil {
 					if ctx.Err() != nil {
-						a.endCancelled(&turnEnd, resp.ToolCalls[idx:])
+						a.endCancelled(turnEnd, resp.ToolCalls[idx:])
 						return
 					}
 					log.Error("gatekeeper failed", "tool", tc.Name, "err", err)
@@ -655,7 +702,7 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 				case ApprovalCancel:
 					log.Info("turn cancelled by operator at tool call", "tool", tc.Name)
 					a.answerToolCall(tc, cancelledToolResult, "cancelled by operator")
-					a.endCancelled(&turnEnd, resp.ToolCalls[idx+1:])
+					a.endCancelled(turnEnd, resp.ToolCalls[idx+1:])
 					return
 				}
 			}
@@ -666,7 +713,7 @@ func (a *Agent) Send(ctx context.Context, userText string) {
 			if err != nil {
 				if ctx.Err() != nil {
 					a.answerToolCall(tc, cancelledToolResult, "cancelled by operator")
-					a.endCancelled(&turnEnd, resp.ToolCalls[idx+1:])
+					a.endCancelled(turnEnd, resp.ToolCalls[idx+1:])
 					return
 				}
 				log.Error("tool failed",
@@ -702,8 +749,8 @@ const cancelledToolResult = "error: cancelled by operator. The user has stopped 
 // matching tool replies is rejected by most providers, so leaving one dangling
 // would break not just this turn but every turn after it.
 //
-// It marks the turn's end rather than publishing it: Send emits that on its way
-// out, whichever path it leaves by.
+// It marks the turn's end rather than publishing it: whoever started the turn
+// emits that on its way out, whichever path it leaves by.
 func (a *Agent) endCancelled(turnEnd *AssistantDoneMsg, unanswered []llm.ToolCall) {
 	for _, tc := range unanswered {
 		a.appendToolResult(tc.ID, tc.Name, cancelledToolResult)

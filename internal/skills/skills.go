@@ -11,17 +11,14 @@
 package skills
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/yuin/goldmark"
-	"github.com/yuin/goldmark/parser"
-	"github.com/yuin/goldmark/text"
-	"go.abhg.dev/goldmark/frontmatter"
-
+	"github.com/ruvolof/yaaih/internal/frontmatter"
 	"github.com/ruvolof/yaaih/internal/logging"
 )
 
@@ -109,18 +106,14 @@ func loadOne(abs string) (Skill, bool) {
 		return Skill{}, false
 	}
 
-	md := goldmark.New(goldmark.WithExtensions(&frontmatter.Extender{}))
-	ctx := parser.NewContext()
-	md.Parser().Parse(text.NewReader(raw), parser.WithContext(ctx))
-
-	fm := frontmatter.Get(ctx)
-	if fm == nil {
+	var meta skillFrontmatter
+	body, err := frontmatter.Parse(raw, &meta)
+	if errors.Is(err, frontmatter.ErrMissing) {
 		log.Warn("skill missing frontmatter, skipping", "path", abs)
 		return Skill{}, false
 	}
-	var meta skillFrontmatter
-	if err := fm.Decode(&meta); err != nil {
-		log.Warn("skill frontmatter decode failed, skipping", "path", abs, "err", err.Error())
+	if err != nil {
+		log.Warn("skill frontmatter invalid, skipping", "path", abs, "err", err.Error())
 		return Skill{}, false
 	}
 	name := strings.TrimSpace(meta.Name)
@@ -134,31 +127,10 @@ func loadOne(abs string) (Skill, bool) {
 		Name:        name,
 		Description: strings.TrimSpace(meta.Description),
 		Path:        abs,
-		Body:        strings.TrimSpace(extractBody(raw)),
+		Body:        strings.TrimSpace(body),
 		Always:      meta.Always,
 		Disabled:    meta.Disabled,
 	}, true
-}
-
-// extractBody returns the markdown content after the closing "---" of the YAML
-// frontmatter. Mirrors config.extractBody so skill bodies are extracted the
-// same way as the agent.md body. If no frontmatter delimiters are found, the
-// whole input is returned.
-func extractBody(raw []byte) string {
-	s := string(raw)
-	if !strings.HasPrefix(s, "---") {
-		return s
-	}
-	rest := s[len("---"):]
-	idx := strings.Index(rest, "\n---")
-	if idx < 0 {
-		return s
-	}
-	body := rest[idx+len("\n---"):]
-	if nl := strings.IndexByte(body, '\n'); nl >= 0 {
-		body = body[nl+1:]
-	}
-	return body
 }
 
 // Find returns the skill called name.

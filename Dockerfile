@@ -11,7 +11,7 @@
 # targets: the harness drives this container's Chromium from the host, and the
 # two ends speak a versioned protocol. `./build.sh update-playwright` bumps
 # playwright-go and reports the tag to use here.
-FROM mcr.microsoft.com/playwright:v1.61.1-noble
+FROM mcr.microsoft.com/playwright:v1.62.1-noble
 
 # Tooling commonly invoked by agents, plus socat which the harness uses to
 # expose Chromium's CDP port: starting with Chrome 132, the browser's

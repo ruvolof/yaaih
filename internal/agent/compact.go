@@ -77,7 +77,11 @@ func (a *Agent) Compact(ctx context.Context, instructions string) {
 	}
 
 	log.Info("compacting", "messages", through-from, "history_msgs", len(messages))
-	summary, usage, err := a.summarise(ctx, messages[from:through], instructions)
+	request := "Conversation to summarise:\n\n" + a.renderSpan(messages[from:through])
+	if instructions != "" {
+		request += "\n\nThe user asks you to pay particular attention to: " + instructions
+	}
+	summary, usage, err := a.streamOneOff(ctx, compactPrompt, request)
 	if err != nil {
 		if ctx.Err() != nil {
 			log.Info("compaction cancelled by operator")
@@ -93,12 +97,7 @@ func (a *Agent) Compact(ctx context.Context, instructions string) {
 		return
 	}
 
-	a.gov.Record(usage)
-	a.globGov.Record(usage)
-	if usage.CostAvailable {
-		a.gov.AddCost(usage.Cost)
-		a.globGov.AddCost(usage.Cost)
-	}
+	a.chargeUsage(usage)
 
 	before := history.Estimate(messages, nil)
 	after := a.replaceWithSummary(from, through, compactSummaryPrefix+"\n\n"+summary)
@@ -119,23 +118,18 @@ func (a *Agent) Compact(ctx context.Context, instructions string) {
 	})
 }
 
-// summarise runs the one-off model call that reads the span and writes the
-// summary. The deltas go to the event stream like any other reply, so the
-// operator watches it being written instead of waiting on a silent turn.
-func (a *Agent) summarise(ctx context.Context, span []llm.Message, instructions string) (string, llm.TokenUsage, error) {
-	request := strings.Builder{}
-	request.WriteString("Conversation to summarise:\n\n")
-	request.WriteString(a.renderSpan(span))
-	if instructions != "" {
-		request.WriteString("\n\nThe user asks you to pay particular attention to: " + instructions)
-	}
-
+// streamOneOff runs a model call outside the conversation — no tools, no
+// history, just instructions and one request — as compaction and spawning do to
+// write about the conversation. The deltas go to the event stream like any
+// other reply, so the operator watches it being written instead of waiting on
+// a silent turn.
+func (a *Agent) streamOneOff(ctx context.Context, instructions, request string) (string, llm.TokenUsage, error) {
 	var streamed strings.Builder
 	resp, err := a.prov.StreamChat(ctx, &llm.ChatRequest{
 		Model: a.cfg.Model,
 		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: compactPrompt},
-			{Role: llm.RoleUser, Content: request.String()},
+			{Role: llm.RoleSystem, Content: instructions},
+			{Role: llm.RoleUser, Content: request},
 		},
 	}, func(ev llm.StreamEvent) {
 		if ev.DeltaText != "" {

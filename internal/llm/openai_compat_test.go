@@ -57,8 +57,7 @@ func (t *connTracker) waitForLiveConns(want int, timeout time.Duration) int {
 }
 
 // requestLog keeps the bodies the server was sent, so a test can assert on what
-// went on the wire rather than on the params struct handed to the SDK — the
-// wire shape is what a provider rejects with a 400.
+// went on the wire — the wire shape is what a provider rejects with a 400.
 type requestLog struct {
 	mu     sync.Mutex
 	bodies [][]byte

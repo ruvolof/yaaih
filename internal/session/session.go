@@ -51,6 +51,10 @@ type Header struct {
 	AgentPath string `json:"agent_path"`
 	Model     string `json:"model"`
 	Provider  string `json:"provider"`
+	// Parent and Task are set on a session spawned from another one: the
+	// session it was briefed from and the task it was started on.
+	Parent ID     `json:"parent,omitempty"`
+	Task   string `json:"task,omitempty"`
 }
 
 // Usage is the token/cost usage of one LLM call, persisted on the assistant
