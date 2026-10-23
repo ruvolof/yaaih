@@ -1,6 +1,7 @@
 // Root BubbleTea model: chat viewport on the left, stats sidebar on the right,
-// input bar across the bottom, and an approval panel docked above the input
-// when a restricted tool needs operator confirmation.
+// input bar across the bottom, an approval panel docked above the input
+// when a restricted tool needs operator confirmation, and the shortcut list
+// drawn over the middle of the screen on ctrl+h.
 package tui
 
 import (
@@ -180,6 +181,12 @@ type Model struct {
 	// sidebarScroll is how many sidebar rows the wheel has scrolled past, for
 	// a terminal too short to show the whole sidebar.
 	sidebarScroll int
+
+	// showKeys is true while the shortcut list covers the middle of the
+	// screen; it takes every key and mouse event until esc closes it.
+	// keysScroll is how far it is scrolled on a screen too short for it.
+	showKeys   bool
+	keysScroll int
 }
 
 // toastExpiredMsg is delivered by a tea.Tick to clear an old toast. The
@@ -370,6 +377,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.scheduleReplyRendering())
 
 	case tea.MouseMsg:
+		if m.showKeys {
+			m.handleKeysOverlayMouse(msg)
+			return m, nil
+		}
 		if handled, cmd := m.dragSelection(msg); handled {
 			return m, cmd
 		}
@@ -403,6 +414,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 
 	case tea.KeyMsg:
+		if m.showKeys && !m.handleKeysOverlayKey(msg.String()) {
+			return m, nil
+		}
 		if m.pendingApproval != nil {
 			if m.handleApprovalKey(msg.String()) || !keysBesideApproval[msg.String()] {
 				return m, nil
@@ -414,6 +428,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "ctrl+d":
 			return m, m.quit()
+		case keysOverlayKey:
+			m.openKeysOverlay()
+			return m, nil
 		case "ctrl+]":
 			if m.terminal == nil {
 				return m, m.setToast("no sandbox to open a shell in")
@@ -701,7 +718,11 @@ func (m *Model) View() string {
 		rows = append(rows, m.renderApprovalPanel())
 	}
 	rows = append(rows, inputBox)
-	return styleApp.Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
+	screen := styleApp.Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
+	if m.showKeys {
+		screen = overlayCenter(screen, m.renderKeysOverlay(), m.width, m.height)
+	}
+	return screen
 }
 
 func (m *Model) sidebarWidth() int {
@@ -1294,19 +1315,7 @@ func (m *Model) renderSidebar() string {
 	if m.toast != "" {
 		fmt.Fprintln(&b, styleOK.Render(truncate(m.toast, 26)))
 	}
-	fmt.Fprintln(&b, styleMuted.Render("↑/↓ history  tab complete"))
-	fmt.Fprintln(&b, styleMuted.Render("drag  select text"))
-	fmt.Fprintln(&b, styleMuted.Render("^y copy selection/reply"))
-	fmt.Fprintln(&b, styleMuted.Render("^t copy chat"))
-	fmt.Fprintln(&b, styleMuted.Render("^o/click expand tool"))
-	fmt.Fprintln(&b, styleMuted.Render("alt+↑/↓ select tool"))
-	if m.terminal != nil {
-		fmt.Fprintln(&b, styleMuted.Render("^] sandbox shell"))
-	}
-	fmt.Fprintln(&b, styleMuted.Render("pgup/pgdn scroll"))
-	fmt.Fprintln(&b, styleMuted.Render("^home/^end top/btm"))
-	fmt.Fprintln(&b, styleMuted.Render("wheel  scroll"))
-	fmt.Fprintln(&b, styleMuted.Render("/exit  quit (or /help)"))
+	fmt.Fprintln(&b, styleMuted.Render("^h all shortcuts"))
 	fmt.Fprintln(&b, styleMuted.Render("^c quit"))
 	return b.String()
 }

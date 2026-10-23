@@ -54,4 +54,11 @@ var (
 			Border(lipgloss.DoubleBorder()).
 			BorderForeground(colorWarn).
 			Padding(0, 1)
+
+	styleKeysOverlay = lipgloss.NewStyle().
+				Foreground(colorFG).
+				Background(colorBG).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorAccent).
+				Padding(0, 1)
 )

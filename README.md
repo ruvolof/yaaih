@@ -197,6 +197,7 @@ the input:
 
 | Key | Effect |
 | --- | --- |
+| Ctrl+H | Show all shortcuts (Esc closes) |
 | `y` | run this call |
 | `a` | run it and stop asking about this tool for the session |
 | `A` | run it and stop asking about any tool for the session |
