@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -36,18 +37,30 @@ var log = logging.For("tui")
 // the receiving app gets plain text.
 var ansiCSI = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
-// writeClipboard puts text on the system clipboard. It writes straight to the
-// terminal rather than through the program, in a single write so it cannot
-// split a frame the renderer is flushing.
+// writeClipboard puts text on the system clipboard by both routes there are,
+// because neither covers every setup: the local clipboard tool (wl-copy,
+// xclip or xsel, pbcopy, the Win32 API) reaches the desktop the harness runs
+// on, and OSC 52 reaches the terminal, which is the operator's desktop over
+// SSH. VTE terminals (GNOME Terminal, Ptyxis) ignore OSC 52, and a host
+// reached over SSH usually has no clipboard tool. The escape sequence goes
+// straight to the terminal rather than through the program, in a single
+// write so it cannot split a frame the renderer is flushing.
 var writeClipboard = func(text string) error {
-	_, err := io.WriteString(os.Stdout, osc52(text))
-	return err
+	if _, err := io.WriteString(os.Stdout, osc52(text)); err != nil {
+		return err
+	}
+	if clipboard.Unsupported {
+		return nil
+	}
+	if err := clipboard.WriteAll(text); err != nil {
+		log.Warn("clipboard tool failed; copy relies on OSC 52 alone", "err", err)
+	}
+	return nil
 }
 
 // osc52 is the escape sequence asking the terminal to set the system
-// clipboard. The terminal owns the clipboard, so copying needs no helper
-// program and works over SSH; a terminal without OSC 52 support, or tmux
-// without set-clipboard on, drops the sequence without a word.
+// clipboard. A terminal without OSC 52 support, or tmux without
+// set-clipboard on, drops the sequence without a word.
 func osc52(text string) string {
 	return "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\a"
 }

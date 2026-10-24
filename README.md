@@ -307,9 +307,11 @@ resumed, and the sidebar names it.
 | Ctrl+T | Copy the whole conversation |
 | Ctrl+] | Switch between the chat and a shell in the sandbox (see below) |
 
-Copying goes through the terminal (OSC 52), so it needs no clipboard tool and
-works over SSH. Most modern terminals support it; inside tmux it needs
-`set -g set-clipboard on`.
+Copying goes two ways at once: through the local clipboard tool (`wl-copy`,
+`xclip` or `xsel` on Linux, `pbcopy` on macOS, built in on Windows) and through
+the terminal (OSC 52). The first covers terminals that ignore OSC 52, such as
+GNOME Terminal and Ptyxis; the second covers SSH, where the remote host has no
+clipboard of yours. Inside tmux, OSC 52 needs `set -g set-clipboard on`.
 
 **The sandbox shell.** Ctrl+] hands the whole terminal to an interactive bash
 inside the sandbox, and Ctrl+] again brings the chat back. The shell starts in
