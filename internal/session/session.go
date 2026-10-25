@@ -18,8 +18,11 @@ package session
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -350,14 +353,23 @@ func LoadTranscript(dir string, id ID) (Transcript, error) {
 	var loadedSkills []string
 	answered := map[string]bool{} // tool_call ids that received a tool result
 
-	sc := bufio.NewScanner(f)
-	// Allow long lines: tool output and big assistant messages can exceed the
-	// default 64 KiB token limit.
-	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	// Lines are read whole however long they are: every line was a message held
+	// in memory when it was written, and dropping one would leave a tool call
+	// unanswered or shift the positions a later compaction line indexes into.
+	reader := bufio.NewReaderSize(f, 64*1024)
 	lineNo := 0
-	for sc.Scan() {
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				return Transcript{Header: hdr}, fmt.Errorf("session: read %s: %w", path, readErr)
+			}
+			if len(line) == 0 {
+				break
+			}
+		}
 		lineNo++
-		raw := sc.Bytes()
+		raw := bytes.TrimRight(line, "\r\n")
 		if len(raw) == 0 {
 			continue
 		}
@@ -417,9 +429,6 @@ func LoadTranscript(dir string, id ID) (Transcript, error) {
 		default:
 			log.Warn("session line skipped (unknown type)", "path", path, "line", lineNo, "type", probe.Type)
 		}
-	}
-	if err := sc.Err(); err != nil {
-		return Transcript{Header: hdr}, fmt.Errorf("session: scan %s: %w", path, err)
 	}
 
 	return Transcript{

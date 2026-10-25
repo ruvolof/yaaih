@@ -109,6 +109,76 @@ func TestLoadKeepsAnsweredToolCalls(t *testing.T) {
 	}
 }
 
+// A tool result far past any line buffer has to come back whole: skipping it
+// would leave the call before it unanswered in the middle of the conversation.
+func TestLoadKeepsAnOversizedLine(t *testing.T) {
+	base := t.TempDir()
+	id := ID("20260605-101122-HUGE")
+	hugeOutput := strings.Repeat("x", 20*1024*1024)
+	w, err := NewWriter(base, testHeader(id))
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	appendMessages(t, w, []llm.Message{
+		{Role: llm.RoleUser, Content: "cat the log"},
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "call_big", Name: "shell_exec"}}},
+		{Role: llm.RoleTool, ToolCallID: "call_big", Name: "shell_exec", Content: hugeOutput},
+		{Role: llm.RoleAssistant, Content: "That is a big log."},
+	})
+	_ = w.Close("clean")
+
+	_, got, _, err := Load(base, id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("got %d messages, want 4", len(got))
+	}
+	if got[2].ToolCallID != "call_big" || got[2].Content != hugeOutput {
+		t.Errorf("oversized tool result not restored: call %q, %d bytes", got[2].ToolCallID, len(got[2].Content))
+	}
+	if got[3].Content != "That is a big log." {
+		t.Errorf("message after the oversized line = %+v", got[3])
+	}
+}
+
+func TestLoadReadsAFinalLineWithoutNewline(t *testing.T) {
+	base := t.TempDir()
+	id := ID("20260605-101122-TAIL")
+	transcript := `{"type":"header","version":1,"id":"20260605-101122-TAIL"}` + "\r\n" +
+		`{"type":"message","seq":1,"role":"user","content":"hi"}` + "\r\n" +
+		`{"type":"message","seq":2,"role":"assistant","content":"hello"}`
+	if err := os.WriteFile(filepath.Join(base, string(id)+".jsonl"), []byte(transcript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, got, _, err := Load(base, id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got) != 2 || got[1].Content != "hello" {
+		t.Fatalf("got %+v, want the unterminated last message kept", got)
+	}
+}
+
+func TestLoadSkipsATruncatedFinalLine(t *testing.T) {
+	base := t.TempDir()
+	id := ID("20260605-101122-CUT")
+	transcript := `{"type":"message","seq":1,"role":"user","content":"hi"}` + "\n" +
+		`{"type":"message","seq":2,"role":"assistant","content":"hel`
+	if err := os.WriteFile(filepath.Join(base, string(id)+".jsonl"), []byte(transcript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, got, _, err := Load(base, id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got) != 1 || got[0].Content != "hi" {
+		t.Fatalf("got %+v, want only the complete line", got)
+	}
+}
+
 func TestOpenForAppendNoDuplicateHeader(t *testing.T) {
 	base := t.TempDir()
 	id := ID("20260605-101122-RESM")
