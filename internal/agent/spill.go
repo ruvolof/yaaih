@@ -10,8 +10,6 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
-
-	"github.com/ruvolof/yaaih/internal/executor"
 )
 
 // spillDirName is where full tool outputs are written, relative to the
@@ -52,20 +50,18 @@ func (a *Agent) spillToolResult(toolCallID, name, content string) string {
 }
 
 // spillAccess returns a function rendering the note for a spill filename, or
-// nil when the agent has no tool that could open it. Both tools need the
-// sandbox runner; the path has to be expressed in terms of whichever one it
-// will be handed to: shell commands take container paths, file_read resolves
-// against the workspace root.
+// nil when the agent has no tool that could open it.
 func (a *Agent) spillAccess() func(file string) string {
-	switch {
-	case a.runner != nil && a.cfg.HasCapability("shell"):
+	reach := workspaceReachFor(a.cfg, a.runner)
+	switch reach {
+	case reachShell:
 		return func(file string) string {
-			return "full output: " + path.Join(executor.ContainerWorkspace, spillDirName, file) +
+			return "full output: " + reach.path(path.Join(spillDirName, file)) +
 				" — grep, sed or tail it with shell_exec to get the part you need"
 		}
-	case a.runner != nil && a.cfg.HasCapability("filesystem"):
+	case reachFilesystem:
 		return func(file string) string {
-			return "full output: " + path.Join(spillDirName, file) +
+			return "full output: " + reach.path(path.Join(spillDirName, file)) +
 				" — read it with file_read, a page at a time"
 		}
 	default:

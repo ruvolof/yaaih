@@ -1,12 +1,15 @@
 package agent
 
 import (
+	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/ruvolof/yaaih/internal/browser"
 	"github.com/ruvolof/yaaih/internal/config"
+	"github.com/ruvolof/yaaih/internal/executor"
 	"github.com/ruvolof/yaaih/internal/llm"
 )
 
@@ -237,4 +240,45 @@ func names(defs []llm.ToolDefinition) []string {
 		out = append(out, def.Name)
 	}
 	return out
+}
+
+// The browser writes screenshots to a host directory the agent never sees, so
+// the path handed back has to be one the agent's own tools can open: a sandbox
+// path for the shell, a workspace-relative one for the file tools.
+func TestScreenshotResultNamesThePathTheAgentCanOpen(t *testing.T) {
+	workspaceRoot := filepath.Join(t.TempDir(), "workspace")
+	hostPath := filepath.Join(workspaceRoot, "screenshots", "screenshot-1.png")
+
+	cases := []struct {
+		capabilities []string
+		runner       executor.Executor
+		wantPath     string
+	}{
+		{[]string{"browser", "shell", "filesystem"}, &stubRunner{}, "/workspace/screenshots/screenshot-1.png"},
+		{[]string{"browser", "filesystem"}, &stubRunner{}, "screenshots/screenshot-1.png"},
+		{[]string{"browser"}, &stubRunner{}, "screenshots/screenshot-1.png"},
+		{[]string{"browser", "shell"}, nil, "screenshots/screenshot-1.png"},
+	}
+	for _, tc := range cases {
+		reach := workspaceReachFor(&config.Config{Capabilities: tc.capabilities}, tc.runner)
+		got := screenshotResult(reach, workspaceRoot, hostPath, "# Title")
+		want := "Saved screenshot to " + tc.wantPath + ". Page text:\n\n# Title"
+		if got != want {
+			t.Errorf("capabilities %v, runner %v: result = %q, want %q", tc.capabilities, tc.runner != nil, got, want)
+		}
+		if strings.Contains(got, workspaceRoot) {
+			t.Errorf("capabilities %v: result leaks the host path: %q", tc.capabilities, got)
+		}
+	}
+}
+
+func TestScreenshotResultOutsideTheWorkspaceNamesNoPath(t *testing.T) {
+	root := t.TempDir()
+	workspaceRoot := filepath.Join(root, "workspace")
+	hostPath := filepath.Join(root, "elsewhere", "screenshot-1.png")
+
+	reach := workspaceReachFor(&config.Config{Capabilities: []string{"shell"}}, &stubRunner{})
+	if got := screenshotResult(reach, workspaceRoot, hostPath, ""); got != "Saved screenshot." {
+		t.Errorf("result = %q, want no path for a file the agent cannot reach", got)
+	}
 }

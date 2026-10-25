@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -248,22 +249,20 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 		},
 	})
 
+	screenshotReach := workspaceReachFor(cfg, runner)
 	register(br != nil, &Tool{
 		Capability: "browser",
 		Def: llm.ToolDefinition{
 			Name:        "browser_screenshot",
-			Description: "Capture a PNG screenshot of the current page. The result is the path to the saved image followed by a Markdown text summary of the page.",
+			Description: screenshotDescription(screenshotReach),
 			Parameters:  emptyObjectSchema(),
 		},
 		Fn: func(ctx context.Context, args string) (string, error) {
-			path, pageText, err := br.Screenshot(ctx)
+			hostPath, pageText, err := br.Screenshot(ctx)
 			if err != nil {
 				return "", err
 			}
-			if pageText == "" {
-				return fmt.Sprintf("Saved screenshot to %s.", path), nil
-			}
-			return fmt.Sprintf("Saved screenshot to %s. Page text:\n\n%s", path, pageText), nil
+			return screenshotResult(screenshotReach, cfg.Runtime.Workspace, hostPath, pageText), nil
 		},
 	})
 
@@ -522,6 +521,40 @@ func NewRegistry(cfg *config.Config, runner executor.Executor, br *browser.Brows
 	})
 
 	return r
+}
+
+// screenshotDescription tells the model what browser_screenshot hands back and
+// which of its tools opens the image. The image never reaches the model
+// itself: messages carry text only.
+func screenshotDescription(reach workspaceReach) string {
+	const capture = "Capture a full-page PNG screenshot of the current page. "
+	switch reach {
+	case reachShell:
+		return capture + "The result is the image's path in the sandbox, for use with shell_exec, " +
+			"followed by a Markdown text summary of the page; the image itself is not shown to you."
+	case reachFilesystem:
+		return capture + "The result is the image's path relative to the workspace root, as file_list shows it, " +
+			"followed by a Markdown text summary of the page; the image itself is not shown to you."
+	default:
+		return capture + "The image is saved in the workspace for the operator; the result is its " +
+			"workspace-relative path followed by a Markdown text summary of the page."
+	}
+}
+
+// screenshotResult renders a saved screenshot for the model, naming it by the
+// path its own tools take rather than by the host path the browser wrote to.
+func screenshotResult(reach workspaceReach, workspaceRoot, hostPath, pageText string) string {
+	saved := "Saved screenshot."
+	relPath, err := filepath.Rel(workspaceRoot, hostPath)
+	if err == nil && filepath.IsLocal(relPath) {
+		saved = fmt.Sprintf("Saved screenshot to %s.", reach.path(filepath.ToSlash(relPath)))
+	} else {
+		log.Warn("screenshot saved outside the workspace", "path", hostPath, "workspace", workspaceRoot)
+	}
+	if pageText == "" {
+		return saved
+	}
+	return saved + " Page text:\n\n" + pageText
 }
 
 func emptyObjectSchema() map[string]any {
