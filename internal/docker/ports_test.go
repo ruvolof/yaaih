@@ -53,6 +53,17 @@ func TestExplicitHostIPAndRemappingAreKept(t *testing.T) {
 	}
 }
 
+func TestEndpointsNameTheHostSide(t *testing.T) {
+	ports, err := ParsePorts([]string{"8040-8050", "0.0.0.0:9000:80", "5353/udp", "[::1]:8443:443/tcp"})
+	if err != nil {
+		t.Fatalf("ParsePorts: %v", err)
+	}
+	want := []string{"127.0.0.1:8040-8050", "0.0.0.0:9000 → 80", "127.0.0.1:5353/udp", "[::1]:8443/tcp → 443"}
+	if got := ports.Endpoints(); !slices.Equal(got, want) {
+		t.Errorf("Endpoints() = %q, want %q", got, want)
+	}
+}
+
 func TestInvalidPortsAreRejected(t *testing.T) {
 	for name, specs := range map[string][]string{
 		"not a port":            {"http"},

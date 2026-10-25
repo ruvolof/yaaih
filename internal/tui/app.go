@@ -23,6 +23,7 @@ import (
 
 	"github.com/ruvolof/yaaih/internal/agent"
 	"github.com/ruvolof/yaaih/internal/config"
+	"github.com/ruvolof/yaaih/internal/docker"
 	"github.com/ruvolof/yaaih/internal/executor"
 	"github.com/ruvolof/yaaih/internal/governor"
 	"github.com/ruvolof/yaaih/internal/llm"
@@ -716,7 +717,7 @@ func (m *Model) View() string {
 	sidebar := styleSidebarBorder.
 		Width(sidebarW).
 		Height(mainH).
-		Render(m.sidebarWindow(sidebarW-styleSidebarBorder.GetHorizontalPadding(), mainH))
+		Render(m.sidebarWindow(m.sidebarContentWidth(), mainH))
 
 	main := lipgloss.JoinHorizontal(lipgloss.Top, chatBox, sidebar)
 
@@ -740,6 +741,11 @@ func (m *Model) View() string {
 
 func (m *Model) sidebarWidth() int {
 	return max(m.width/4, 28)
+}
+
+// sidebarContentWidth is the cells a sidebar line has inside the padding.
+func (m *Model) sidebarContentWidth() int {
+	return m.sidebarWidth() - styleSidebarBorder.GetHorizontalPadding()
 }
 
 // chatBoxWidth is the chat box's width inside its border.
@@ -1264,6 +1270,8 @@ func (m *Model) scheduleReplyRendering() tea.Cmd {
 }
 
 func (m *Model) renderSidebar() string {
+	// truncate's ellipsis takes one cell past its limit.
+	fit := m.sidebarContentWidth() - 1
 	var b strings.Builder
 	fmt.Fprintln(&b, styleHeader.Render("Agent"))
 	if m.cfg != nil {
@@ -1282,7 +1290,13 @@ func (m *Model) renderSidebar() string {
 	fmt.Fprintln(&b, styleHeader.Render("Runtime"))
 	if m.runner != nil {
 		fmt.Fprintln(&b, "docker")
-		fmt.Fprintln(&b, styleMuted.Render(truncate(m.cwd, 26)))
+		fmt.Fprintln(&b, styleMuted.Render(truncateLeft(m.cwd, fit)))
+		if m.cfg != nil && len(m.cfg.Runtime.Ports) > 0 {
+			fmt.Fprintln(&b, "ports:")
+			for _, endpoint := range publishedEndpoints(m.cfg.Runtime.Ports) {
+				fmt.Fprintln(&b, "  "+truncate(endpoint, fit-2))
+			}
+		}
 		if running := runningJobs(m.runner); running > 0 {
 			fmt.Fprintln(&b, styleAccent(fmt.Sprintf("jobs running: %d", running)))
 		}
@@ -1291,13 +1305,13 @@ func (m *Model) renderSidebar() string {
 	}
 	fmt.Fprintln(&b)
 	if m.ag != nil {
-		fmt.Fprint(&b, renderApprovalStanding(m.ag.ApprovalStanding()))
+		fmt.Fprint(&b, renderApprovalStanding(m.ag.ApprovalStanding(), fit))
 		fmt.Fprintln(&b)
 	}
 	fmt.Fprintln(&b, styleHeader.Render("Session"))
 	if m.ag != nil {
 		if parent := m.ag.SessionParent(); parent != "" {
-			fmt.Fprintln(&b, styleMuted.Render(truncate("from "+string(parent), 26)))
+			fmt.Fprintln(&b, styleMuted.Render(truncate("from "+string(parent), fit)))
 		}
 	}
 	fmt.Fprintf(&b, "in:  %d\n", m.sessionStats.TotalInputTokens)
@@ -1326,11 +1340,22 @@ func (m *Model) renderSidebar() string {
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, styleHeader.Render("Keys"))
 	if m.toast != "" {
-		fmt.Fprintln(&b, styleOK.Render(truncate(m.toast, 26)))
+		fmt.Fprintln(&b, styleOK.Render(truncate(m.toast, fit)))
 	}
 	fmt.Fprintln(&b, styleMuted.Render("^h all shortcuts"))
 	fmt.Fprintln(&b, styleMuted.Render("^c quit"))
 	return b.String()
+}
+
+// publishedEndpoints is where the operator reaches the agent's published
+// ports. The specs were validated when the agent was loaded; should they fail
+// to parse anyway, they are shown as written.
+func publishedEndpoints(specs []string) []string {
+	ports, err := docker.ParsePorts(specs)
+	if err != nil {
+		return specs
+	}
+	return ports.Endpoints()
 }
 
 // runningJobs counts the sandbox's shell jobs still running: ones the model
@@ -1349,7 +1374,7 @@ func runningJobs(runner executor.Executor) int {
 // Anything the operator has waved through is highlighted: it stays on for the
 // rest of the session, long after the keypress that turned it on has scrolled
 // out of mind.
-func renderApprovalStanding(standing agent.ApprovalStanding) string {
+func renderApprovalStanding(standing agent.ApprovalStanding, fit int) string {
 	var b strings.Builder
 	fmt.Fprintln(&b, styleHeader.Render("Approval"))
 	switch {
@@ -1360,7 +1385,7 @@ func renderApprovalStanding(standing agent.ApprovalStanding) string {
 	case len(standing.Tools) > 0:
 		fmt.Fprintln(&b, styleAccent("auto:"))
 		for _, toolName := range standing.Tools {
-			fmt.Fprintln(&b, styleAccent(truncate("  "+toolName, 26)))
+			fmt.Fprintln(&b, styleAccent(truncate("  "+toolName, fit)))
 		}
 	default:
 		fmt.Fprintln(&b, "asks every call")
@@ -1497,7 +1522,7 @@ func renderHistoryTrimmed(msg agent.HistoryTrimmedMsg) string {
 		strings.Join(did, " and "), humanTokens(msg.BeforeTokens), humanTokens(msg.AfterTokens))
 }
 
-// humanTokens renders a token count for a sidebar column 26 characters wide.
+// humanTokens renders a token count compactly enough for the narrowest sidebar.
 func humanTokens(n int) string {
 	if n < 1000 {
 		return fmt.Sprintf("%d", n)
@@ -1507,6 +1532,16 @@ func humanTokens(n int) string {
 
 func styleAccent(s string) string {
 	return lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render(s)
+}
+
+// truncateLeft fits s on one line of n cells after a leading ellipsis, keeping
+// its end: the informative part of a path.
+func truncateLeft(s string, n int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if width := ansi.StringWidth(s); width > n {
+		return "…" + ansi.TruncateLeft(s, width-n, "")
+	}
+	return s
 }
 
 // truncate fits s on one line of n cells, then the ellipsis.

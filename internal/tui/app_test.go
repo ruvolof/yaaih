@@ -10,9 +10,11 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ruvolof/yaaih/internal/agent"
 	"github.com/ruvolof/yaaih/internal/config"
+	"github.com/ruvolof/yaaih/internal/executor"
 	"github.com/ruvolof/yaaih/internal/governor"
 	"github.com/ruvolof/yaaih/internal/llm"
 	"github.com/ruvolof/yaaih/internal/session"
@@ -137,6 +139,58 @@ func TestSidebarShowsSpendAgainstItsLimits(t *testing.T) {
 	sidebar = stripANSI(m.renderSidebar())
 	if strings.Contains(sidebar, " / ") {
 		t.Errorf("sidebar shows a limit for a session without one:\n%s", sidebar)
+	}
+}
+
+// idleSandbox is a sandbox with no jobs, which is all the sidebar asks of one.
+type idleSandbox struct{ executor.Executor }
+
+func (idleSandbox) Jobs() []executor.JobInfo { return nil }
+
+func TestSidebarListsThePublishedPorts(t *testing.T) {
+	m := &Model{
+		cfg:    &config.Config{Runtime: config.RuntimeCfg{Ports: []string{"8040-8050", "0.0.0.0:9000:80"}}},
+		runner: idleSandbox{},
+	}
+	sidebar := stripANSI(m.renderSidebar())
+	for _, want := range []string{"ports:", "  127.0.0.1:8040-8050", "  0.0.0.0:9000 → 80"} {
+		if !strings.Contains(sidebar, want) {
+			t.Errorf("sidebar is missing %q:\n%s", want, sidebar)
+		}
+	}
+
+	m.cfg.Runtime.Ports = nil
+	if sidebar := stripANSI(m.renderSidebar()); strings.Contains(sidebar, "ports:") {
+		t.Errorf("sidebar lists ports for an agent that publishes none:\n%s", sidebar)
+	}
+}
+
+// The sidebar takes a quarter of a wide screen; its lines must use that room
+// rather than stop at what the narrowest sidebar fits.
+func TestSidebarLinesFillAWideSidebar(t *testing.T) {
+	workspace := "/home/operator/projects/some-long-project-name/agents/recon/workspace"
+	m := &Model{
+		width:  320,
+		cwd:    workspace,
+		cfg:    &config.Config{Runtime: config.RuntimeCfg{Ports: []string{"0.0.0.0:8040-8050:8040-8050"}}},
+		runner: idleSandbox{},
+	}
+	sidebar := stripANSI(m.renderSidebar())
+	for _, want := range []string{workspace, "  0.0.0.0:8040-8050\n"} {
+		if !strings.Contains(sidebar, want) {
+			t.Errorf("wide sidebar is missing %q:\n%s", want, sidebar)
+		}
+	}
+
+	m.width = 80
+	sidebar = stripANSI(m.renderSidebar())
+	if !strings.Contains(sidebar, "\n…me/agents/recon/workspace\n") {
+		t.Errorf("narrow sidebar does not keep the end of the workspace path:\n%s", sidebar)
+	}
+	for line := range strings.SplitSeq(sidebar, "\n") {
+		if width := ansi.StringWidth(line); width > m.sidebarContentWidth() {
+			t.Errorf("line %q is %d cells, wider than the sidebar's %d", line, width, m.sidebarContentWidth())
+		}
 	}
 }
 
@@ -332,7 +386,7 @@ func TestSidebarShowsWhatRunsWithoutAsking(t *testing.T) {
 		{agent.ApprovalStanding{Required: true, All: true}, []string{"auto: all tools"}},
 	}
 	for _, tc := range cases {
-		lines := strings.Split(strings.TrimRight(stripANSI(renderApprovalStanding(tc.standing)), "\n"), "\n")
+		lines := strings.Split(strings.TrimRight(stripANSI(renderApprovalStanding(tc.standing, 25)), "\n"), "\n")
 		if want := append([]string{"Approval"}, tc.want...); !slices.Equal(lines, want) {
 			t.Errorf("standing %+v renders %q, want %q", tc.standing, lines, want)
 		}

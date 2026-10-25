@@ -73,6 +73,27 @@ func ParsePorts(specs []string) (PublishedPorts, error) {
 	return ports, nil
 }
 
+// Endpoints says where the operator reaches each spec: the host address and
+// ports, followed by the container ports only when they differ
+// ("127.0.0.1:8040-8050", "0.0.0.0:9000 → 80", "127.0.0.1:5353/udp").
+func (ports PublishedPorts) Endpoints() []string {
+	endpoints := make([]string, 0, len(ports.specs))
+	for index, spec := range ports.specs {
+		hostSide := spec[:strings.LastIndex(spec, ":")]
+		containerPorts, protocol, hasProtocol := strings.Cut(ports.containerPorts[index], "/")
+		hostPorts := hostSide[strings.LastIndex(hostSide, ":")+1:]
+		endpoint := hostSide
+		if hasProtocol {
+			endpoint += "/" + protocol
+		}
+		if hostPorts != containerPorts {
+			endpoint += " → " + containerPorts
+		}
+		endpoints = append(endpoints, endpoint)
+	}
+	return endpoints
+}
+
 // loopbackByDefault spells out the host IP and host port that a spec leaves to
 // ParsePorts' defaults.
 func loopbackByDefault(spec string) string {
