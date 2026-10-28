@@ -36,7 +36,7 @@ func main() {
 	agentPath := flag.String("agent", "", "path to a single agent folder (contains agent.md); selected on startup")
 	agentsRoot := flag.String("agents", "", "path to a folder of agent folders; starts with no agent selected (pick with /new)")
 	logLevel := flag.String("log-level", "info", "log verbosity: debug, info, warn, error")
-	resumeID := flag.String("resume", "", "resume a prior session by id (from the agent's sessions/ folder)")
+	resumeRef := flag.String("resume", "", "resume a prior session of the agent: its id, the path to its file in the agent's sessions/ folder, or \"latest\"")
 	newSession := flag.Bool("new-session", true, "persist this run to the agent's sessions/ folder (ignored when --resume is set)")
 	workspaceDir := flag.String("workspace", "", "override the workspace directory from agent.md")
 	skillsDir := flag.String("skills-dir", "", "override the skills directory from agent.md")
@@ -92,7 +92,7 @@ func main() {
 		SessionsDir: *sessionsDir,
 	}
 	root, initial := resolveAgentSelection(*agentPath, *agentsRoot)
-	if err := run(root, initial, *resumeID, *newSession, overrides); err != nil {
+	if err := run(root, initial, *resumeRef, *newSession, overrides); err != nil {
 		log.Error("fatal", "err", err)
 		fmt.Fprintln(os.Stderr, "fatal:", err)
 		if p := logSess.Path(); p != "" {
@@ -124,7 +124,7 @@ func resolveAgentSelection(agentPath, agentsRoot string) (root, initial string) 
 // operator picks a different agent with /new <agent> — tears the stack down and
 // rebuilds it for the new agent. The loop exits when the TUI quits without a
 // switch target (/exit or Ctrl+C).
-func run(agentsRoot, initialAgent, resumeID string, newSession bool, overrides config.Overrides) error {
+func run(agentsRoot, initialAgent, resumeRef string, newSession bool, overrides config.Overrides) error {
 	log := logging.For("main")
 
 	rootCtx, cancel := context.WithCancel(context.Background())
@@ -148,7 +148,7 @@ func run(agentsRoot, initialAgent, resumeID string, newSession bool, overrides c
 	inputHistory := tui.NewInputHistory()
 
 	current := initialAgent
-	resume := resumeID // resume id for the next build (launch agent only at first)
+	resume := resumeRef // session to resume on the next build (launch agent only at first)
 	first := true
 	for {
 		var rt *agentRuntime
@@ -222,7 +222,7 @@ type agentRuntime struct {
 // buildAgentRuntime loads the agent at agentDir and wires up its runtime,
 // provider, session, agent, and script tools. On any failure it releases
 // whatever it has already started before returning.
-func buildAgentRuntime(ctx context.Context, agentDir, resumeID string, newSession bool, overrides config.Overrides, globalGov *governor.Governor) (*agentRuntime, error) {
+func buildAgentRuntime(ctx context.Context, agentDir, resumeRef string, newSession bool, overrides config.Overrides, globalGov *governor.Governor) (*agentRuntime, error) {
 	log := logging.For("main")
 
 	cfg, err := config.Load(agentDir, overrides)
@@ -275,7 +275,7 @@ func buildAgentRuntime(ctx context.Context, agentDir, resumeID string, newSessio
 	// 3. Session persistence: resume a prior transcript or start a new one. When
 	// resuming, seed the session governor with the transcript's accumulated
 	// usage so the per-session cost continues where it left off.
-	sessWriter, seed, err := setupSession(resumeID, newSession, cfg, cfg.SessionsDir)
+	sessWriter, seed, err := setupSession(resumeRef, newSession, cfg, cfg.SessionsDir)
 	if err != nil {
 		dockerCleanup()
 		if runner != nil {
@@ -384,23 +384,28 @@ func setupRuntime(ctx context.Context, cfg *config.Config) (executor.Executor, *
 	return runner, br, cleanup, nil
 }
 
-// setupSession wires up transcript persistence. When resumeID is set it loads
-// the prior transcript (its messages, accumulated usage, and loaded skills) and
-// reopens that file for appending. When resumeID is empty and newSession is
+// setupSession wires up transcript persistence. When resumeRef is set it
+// resolves it to a session (see session.ResolveRef), loads the prior transcript
+// (its messages, accumulated usage, and loaded skills) and reopens that file
+// for appending. When resumeRef is empty and newSession is
 // true it creates a fresh session file with a header. Returns nil writer and an
 // empty transcript when persistence is disabled.
 //
 // sessionsDir is the directory holding this agent's transcripts (cfg.SessionsDir,
 // default <agent folder>/sessions).
-func setupSession(resumeID string, newSession bool, cfg *config.Config, sessionsDir string) (*session.Writer, session.Transcript, error) {
+func setupSession(resumeRef string, newSession bool, cfg *config.Config, sessionsDir string) (*session.Writer, session.Transcript, error) {
 	log := logging.For("main")
 
-	if resumeID != "" {
-		seed, err := session.LoadTranscript(sessionsDir, session.ID(resumeID))
+	if resumeRef != "" {
+		resumeID, err := session.ResolveRef(sessionsDir, resumeRef)
+		if err != nil {
+			return nil, session.Transcript{}, fmt.Errorf("resume %s: %w", resumeRef, err)
+		}
+		seed, err := session.LoadTranscript(sessionsDir, resumeID)
 		if err != nil {
 			return nil, session.Transcript{}, fmt.Errorf("resume %s: %w", resumeID, err)
 		}
-		w, err := session.OpenForAppend(sessionsDir, session.ID(resumeID))
+		w, err := session.OpenForAppend(sessionsDir, resumeID)
 		if err != nil {
 			return nil, session.Transcript{}, fmt.Errorf("reopen %s: %w", resumeID, err)
 		}

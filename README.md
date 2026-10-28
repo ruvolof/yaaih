@@ -272,7 +272,7 @@ resumed, and the sidebar names it.
 | --- | --- |
 | `--agent <folder>` | Start with this agent; its sibling folders can be reached with `/new` |
 | `--agents <folder>` | Start with no agent selected and pick one with `/new <name>` |
-| `--resume <id>` | Reopen a saved session |
+| `--resume <session>` | Reopen a saved session of the selected agent: its id, the path to its `.jsonl` file in the agent's `sessions/` folder, or `latest` for the one written to most recently |
 | `--new-session=false` | Do not save this run |
 | `--log-level` | `debug`, `info` (default), `warn`, `error` |
 

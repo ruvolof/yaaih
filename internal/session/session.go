@@ -538,3 +538,74 @@ func List(dir string) ([]ID, error) {
 	sort.Slice(ids, func(i, j int) bool { return ids[i] > ids[j] })
 	return ids, nil
 }
+
+// LatestRef is the reference ResolveRef reads as "the most recent session".
+const LatestRef = "latest"
+
+// ResolveRef turns an operator's reference to a session in the sessions
+// directory dir into its id. The reference is LatestRef, a path to one of
+// dir's session files (what shell completion produces), or a bare id.
+func ResolveRef(dir, ref string) (ID, error) {
+	switch {
+	case ref == LatestRef:
+		return Latest(dir)
+	case filepath.Ext(ref) == ".jsonl":
+		return idFromFile(dir, ref)
+	default:
+		id := ID(ref)
+		return id, ValidateID(id)
+	}
+}
+
+// Latest returns the session in dir written to most recently. The file's
+// modification time decides rather than the id, because a session renamed with
+// /save no longer sorts by when it started.
+func Latest(dir string) (ID, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("session: read dir %s: %w", dir, err)
+	}
+	var latestID ID
+	var latestTime time.Time
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".jsonl" {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if latestID == "" || info.ModTime().After(latestTime) {
+			latestID, latestTime = ID(strings.TrimSuffix(entry.Name(), ".jsonl")), info.ModTime()
+		}
+	}
+	if latestID == "" {
+		return "", fmt.Errorf("session: no sessions in %s", dir)
+	}
+	return latestID, nil
+}
+
+// idFromFile reads a session id off the path of its file. A path with a
+// directory must point into dir: sessions are only loaded from, appended to and
+// renamed within the agent's own sessions directory.
+func idFromFile(dir, path string) (ID, error) {
+	id := ID(strings.TrimSuffix(filepath.Base(path), ".jsonl"))
+	if err := ValidateID(id); err != nil {
+		return "", err
+	}
+	if filepath.Base(path) == path {
+		return id, nil
+	}
+	fileDir, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return "", fmt.Errorf("session: %w", err)
+	}
+	sessionsDir, err := os.Stat(dir)
+	if err != nil {
+		return "", fmt.Errorf("session: %w", err)
+	}
+	if !os.SameFile(fileDir, sessionsDir) {
+		return "", fmt.Errorf("session: %s is not in this agent's sessions folder %s (select its agent with --agent)", path, dir)
+	}
+	return id, nil
+}

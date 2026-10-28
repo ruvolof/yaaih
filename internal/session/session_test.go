@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ruvolof/yaaih/internal/llm"
 )
@@ -344,6 +345,82 @@ func TestListReverseChronological(t *testing.T) {
 		if ids[i] != want[i] {
 			t.Fatalf("order = %v, want %v", ids, want)
 		}
+	}
+}
+
+func TestResolveRefLatestIsTheMostRecentlyWritten(t *testing.T) {
+	sessionsDir := t.TempDir()
+	for _, id := range []ID{"20260101-000000-aaaa", "20260301-000000-bbbb", "renamed"} {
+		w, err := NewWriter(sessionsDir, testHeader(id))
+		if err != nil {
+			t.Fatalf("NewWriter: %v", err)
+		}
+		_ = w.Close("clean")
+	}
+	start := time.Now()
+	for offset, id := range []ID{"20260301-000000-bbbb", "renamed", "20260101-000000-aaaa"} {
+		modified := start.Add(time.Duration(offset) * time.Hour)
+		if err := os.Chtimes(filepath.Join(sessionsDir, string(id)+".jsonl"), modified, modified); err != nil {
+			t.Fatalf("Chtimes: %v", err)
+		}
+	}
+	id, err := ResolveRef(sessionsDir, LatestRef)
+	if err != nil {
+		t.Fatalf("ResolveRef(latest): %v", err)
+	}
+	if id != "20260101-000000-aaaa" {
+		t.Errorf("ResolveRef(latest) = %q, want the last written 20260101-000000-aaaa", id)
+	}
+}
+
+func TestResolveRefLatestWithoutSessions(t *testing.T) {
+	if _, err := ResolveRef(filepath.Join(t.TempDir(), "missing"), LatestRef); err == nil {
+		t.Error("ResolveRef(latest) on a missing dir = nil error, want error")
+	}
+}
+
+func TestResolveRefAcceptsTheSessionFile(t *testing.T) {
+	sessionsDir := t.TempDir()
+	w, err := NewWriter(sessionsDir, testHeader("20260605-101122-aGzX"))
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	_ = w.Close("clean")
+
+	t.Chdir(filepath.Dir(sessionsDir))
+	relative := filepath.Join(filepath.Base(sessionsDir), "20260605-101122-aGzX.jsonl")
+	for _, ref := range []string{
+		"20260605-101122-aGzX",
+		"20260605-101122-aGzX.jsonl",
+		filepath.Join(sessionsDir, "20260605-101122-aGzX.jsonl"),
+		relative,
+	} {
+		id, err := ResolveRef(sessionsDir, ref)
+		if err != nil {
+			t.Errorf("ResolveRef(%q): %v", ref, err)
+			continue
+		}
+		if id != "20260605-101122-aGzX" {
+			t.Errorf("ResolveRef(%q) = %q, want 20260605-101122-aGzX", ref, id)
+		}
+	}
+}
+
+func TestResolveRefRejectsAFileOutsideTheSessionsDir(t *testing.T) {
+	sessionsDir, otherDir := t.TempDir(), t.TempDir()
+	w, err := NewWriter(otherDir, testHeader("elsewhere"))
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	_ = w.Close("clean")
+	if _, err := ResolveRef(sessionsDir, filepath.Join(otherDir, "elsewhere.jsonl")); err == nil {
+		t.Error("ResolveRef(file in another dir) = nil error, want error")
+	}
+}
+
+func TestResolveRefRejectsAnInvalidID(t *testing.T) {
+	if _, err := ResolveRef(t.TempDir(), "a/b"); err == nil {
+		t.Error("ResolveRef(a/b) = nil error, want error")
 	}
 }
 
