@@ -34,6 +34,7 @@ var log = logging.For("agent")
 // these by type-switching.
 type Event interface{ isAgentEvent() }
 
+func (IterationStartMsg) isAgentEvent()   {}
 func (AssistantDeltaMsg) isAgentEvent()   {}
 func (AssistantMessageMsg) isAgentEvent() {}
 func (AssistantDoneMsg) isAgentEvent()    {}
@@ -577,6 +578,7 @@ func (a *Agent) runTurn(ctx context.Context, userText string, turnEnd *Assistant
 			return
 		}
 		log.Debug("iteration", "n", iter+1, "max", maxIter)
+		a.publish(IterationStartMsg{Iteration: iter + 1, MaxIterations: maxIter})
 		tools := a.registry.Definitions(a.cfg.Capabilities)
 		messages, contextStats := a.requestMessages(tools)
 		if contextStats.OverBudget {

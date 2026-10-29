@@ -7,6 +7,7 @@ package tui
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -146,6 +147,17 @@ type Model struct {
 	busy      bool
 	busyFrame int
 
+	// What renderStatus says about the turn in flight: when it started, which
+	// model request it is on (0 until the agent reports one), and the tool it
+	// is running, if any. jobsBeforeTool is the newest shell job when that
+	// tool started, so a job past it is the one the tool started.
+	turnStarted    time.Time
+	iteration      int
+	maxIterations  int
+	runningTool    string
+	runningToolJob int
+	jobsBeforeTool int
+
 	// cancelTurn stops the in-flight turn: it cancels the context handed to
 	// Agent.Send, which unwinds the LLM stream and any running tool. Set when a
 	// turn starts, cleared when one ends. Only esc calls it, and only while
@@ -271,7 +283,9 @@ func New(ctx context.Context, cfg *config.Config, ag *agent.Agent, runner execut
 	}
 	if cfg != nil {
 		m.sessionStats = governor.Stats{Model: cfg.Model}
-		m.cwd = cfg.Runtime.Workspace
+	}
+	if runner != nil {
+		m.cwd = runner.CWD()
 	}
 	if ag != nil {
 		m.events = newEventRelay(ag.Events())
@@ -608,14 +622,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.busy = false
 		m.cancelTurn = nil
+		m.iteration, m.maxIterations = 0, 0
+		m.runningTool, m.runningToolJob = "", 0
+		cmds = append(cmds, m.nextEvent())
+
+	case agent.IterationStartMsg:
+		m.iteration, m.maxIterations = msg.Iteration, msg.MaxIterations
 		cmds = append(cmds, m.nextEvent())
 
 	case agent.ToolCallStartMsg:
 		m.startTool(msg.ID, msg.Name, msg.Args)
+		m.runningTool, m.runningToolJob = msg.Name, jobNamedIn(msg.Name, msg.Args)
+		m.jobsBeforeTool = newestJob(m.runner)
 		cmds = append(cmds, m.nextEvent())
 
 	case agent.ToolCallResultMsg:
 		m.finishTool(msg.ID, msg.Name, msg.Result, msg.Err != "")
+		m.runningTool, m.runningToolJob = "", 0
 		cmds = append(cmds, m.nextEvent())
 
 	case agent.StatsUpdateMsg:
@@ -828,12 +851,14 @@ func (m *Model) relayoutIfSized() {
 }
 
 // renderStatus produces the single-line "status bar" under the chat
-// viewport. While a turn is in flight it shows an
-// animated indicator ("● streaming response.", "..", "...", cycling) and the
-// key that stops the turn, or, while a call waits on the approval panel, that
-// the turn is waiting on the operator rather than on the model. When idle the
-// line is blank — the row is always reserved so layout doesn't shift as the
-// agent transitions in and out of busy.
+// viewport. While a turn is in flight it shows what the turn is doing — the
+// model's response streaming, or the tool it is running and the shell job
+// behind it — with an animated indicator, how long the turn has been running,
+// which model request of the turn's allowance it is on, and the key that stops
+// it; or, while a call waits on the approval panel, that the turn is waiting
+// on the operator rather than on the model. When idle the line is blank — the
+// row is always reserved so layout doesn't shift as the agent transitions in
+// and out of busy.
 func (m *Model) renderStatus(width int) string {
 	if m.pendingApproval != nil {
 		line := "● waiting for your approval of the call below"
@@ -845,15 +870,78 @@ func (m *Model) renderStatus(width int) string {
 	if !m.busy {
 		return strings.Repeat(" ", width)
 	}
+	activity := "streaming response"
+	if m.runningTool != "" {
+		activity = "running " + m.runningTool
+		if job := m.runningJob(); job > 0 {
+			activity += fmt.Sprintf(" (job %d)", job)
+		}
+	}
+	progress := time.Since(m.turnStarted).Truncate(time.Second).String()
+	if m.iteration > 0 {
+		progress += fmt.Sprintf(" · iteration %d/%d", m.iteration, m.maxIterations)
+	}
+	tail := "  " + progress + "  [esc] stop"
 	dots := 1 + m.busyFrame%3
-	// The trailing spaces keep the hint at a fixed column while the dots cycle.
-	line := "● streaming response" + strings.Repeat(".", dots) + strings.Repeat(" ", 3-dots) + "  [esc] stop"
+	// The activity gives way first on a narrow screen, so the stop key stays
+	// in sight. truncate's ellipsis takes one cell past its limit.
+	if room := width - lipgloss.Width("● ...") - lipgloss.Width(tail) - 1; room > 0 {
+		activity = truncate(activity, room)
+	}
+	// The trailing spaces keep the rest of the line at a fixed column while
+	// the dots cycle.
+	line := "● " + activity + strings.Repeat(".", dots) + strings.Repeat(" ", 3-dots) + tail
+	if lipgloss.Width(line) > width {
+		line = truncate(line, width-1)
+	}
 	// Pad to full width so the underlying screen doesn't keep stale bytes
 	// from a previous frame.
 	if pad := width - lipgloss.Width(line); pad > 0 {
 		line += strings.Repeat(" ", pad)
 	}
 	return styleAccent(line)
+}
+
+// runningJob is the shell job the tool in flight is waiting on: the one it
+// names, or, for shell_exec, the job it started once the executor lists it.
+// 0 when there is none to name.
+func (m *Model) runningJob() int {
+	if m.runningToolJob > 0 || m.runningTool != "shell_exec" || m.runner == nil {
+		return m.runningToolJob
+	}
+	for _, job := range m.runner.Jobs() {
+		if job.Running && job.ID > m.jobsBeforeTool {
+			return job.ID
+		}
+	}
+	return 0
+}
+
+// jobNamedIn is the job a shell_wait or shell_kill call names in its
+// arguments, or 0 for any other call.
+func jobNamedIn(tool, args string) int {
+	if tool != "shell_wait" && tool != "shell_kill" {
+		return 0
+	}
+	var named struct {
+		Job int `json:"job"`
+	}
+	if json.Unmarshal([]byte(args), &named) != nil {
+		return 0
+	}
+	return named.Job
+}
+
+// newestJob is the highest job id the runner has listed so far, or 0.
+func newestJob(runner executor.Executor) int {
+	if runner == nil {
+		return 0
+	}
+	newest := 0
+	for _, job := range runner.Jobs() {
+		newest = max(newest, job.ID)
+	}
+	return newest
 }
 
 // copyLastReply copies the most recent completed assistant turn to the
@@ -998,6 +1086,9 @@ func (m *Model) startTurn(run func(context.Context)) tea.Cmd {
 	if !m.busy {
 		m.busy = true
 		m.busyFrame = 0
+		m.turnStarted = time.Now()
+		m.iteration, m.maxIterations = 0, 0
+		m.runningTool, m.runningToolJob = "", 0
 		// Work refused for landing on top of a running turn must not take the
 		// stop key with it: esc has to keep pointing at the turn that is
 		// actually running.

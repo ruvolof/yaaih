@@ -194,6 +194,95 @@ func TestSidebarLinesFillAWideSidebar(t *testing.T) {
 	}
 }
 
+// shellSandbox is a sandbox whose working directory and job list the test
+// sets.
+type shellSandbox struct {
+	executor.Executor
+	cwd  string
+	jobs []executor.JobInfo
+}
+
+func (sandbox *shellSandbox) CWD() string              { return sandbox.cwd }
+func (sandbox *shellSandbox) Jobs() []executor.JobInfo { return sandbox.jobs }
+
+// The workspace's host path means nothing inside the sandbox; the sidebar shows
+// where the shell is from the start, not only once a turn has reported it.
+func TestSidebarShowsTheSandboxDirectoryBeforeTheFirstTurn(t *testing.T) {
+	cfg := &config.Config{Runtime: config.RuntimeCfg{Workspace: "/home/operator/agents/recon/workspace"}}
+	m := New(context.Background(), cfg, nil, &shellSandbox{cwd: "/workspace"}, t.TempDir(), "", nil)
+
+	if m.cwd != "/workspace" {
+		t.Errorf("cwd = %q before any turn, want the sandbox's /workspace", m.cwd)
+	}
+}
+
+// A long tool chain is the turn the operator most needs to read: what it is
+// doing, how long it has been at it, how far into its iteration allowance it
+// is, and which shell job to look for with Ctrl+].
+func TestStatusLineSaysWhatTheTurnIsDoing(t *testing.T) {
+	sandbox := &shellSandbox{jobs: []executor.JobInfo{{ID: 3, Running: true}}}
+	m := newTestModel(t)
+	m.runner = sandbox
+	m.busy = true
+	m.turnStarted = time.Now().Add(-75 * time.Second)
+	status := func() string { return stripANSI(m.renderStatus(120)) }
+
+	m.Update(agent.IterationStartMsg{Iteration: 2, MaxIterations: 25})
+	for _, want := range []string{"● streaming response", "1m15s · iteration 2/25", "[esc] stop"} {
+		if !strings.Contains(status(), want) {
+			t.Errorf("status %q is missing %q", status(), want)
+		}
+	}
+
+	m.Update(agent.ToolCallStartMsg{ID: "call-1", Name: "shell_exec", Args: `{"command":"make"}`})
+	if got := status(); !strings.Contains(got, "● running shell_exec.") {
+		t.Errorf("status %q does not name the tool running, or names a job it did not start", got)
+	}
+	sandbox.jobs = append(sandbox.jobs, executor.JobInfo{ID: 4, Running: true})
+	if got := status(); !strings.Contains(got, "● running shell_exec (job 4)") {
+		t.Errorf("status %q does not name the job shell_exec started", got)
+	}
+
+	m.Update(agent.ToolCallResultMsg{ID: "call-1", Name: "shell_exec", Result: "[job 4 is still running]"})
+	m.Update(agent.ToolCallStartMsg{ID: "call-2", Name: "shell_wait", Args: `{"job":3}`})
+	if got := status(); !strings.Contains(got, "● running shell_wait (job 3)") {
+		t.Errorf("status %q does not name the job shell_wait follows", got)
+	}
+
+	m.Update(agent.ToolCallResultMsg{ID: "call-2", Name: "shell_wait", Result: "done"})
+	if got := status(); !strings.Contains(got, "● streaming response") {
+		t.Errorf("status %q still names a tool that has answered", got)
+	}
+
+	m.Update(agent.AssistantDoneMsg{})
+	if got := status(); strings.TrimSpace(got) != "" {
+		t.Errorf("status %q is not blank once the turn is over", got)
+	}
+}
+
+// The status line is one row: on a narrow screen the activity gives way so the
+// stop key stays in sight.
+func TestStatusLineFitsANarrowScreen(t *testing.T) {
+	m := &Model{
+		busy:          true,
+		turnStarted:   time.Now(),
+		iteration:     12,
+		maxIterations: 25,
+		runningTool:   "a_script_tool_with_a_rather_long_name",
+	}
+	const width = 60
+	status := stripANSI(m.renderStatus(width))
+
+	if got := ansi.StringWidth(status); got != width || strings.Contains(status, "\n") {
+		t.Errorf("status %q is %d cells, want one row of %d", status, got, width)
+	}
+	for _, want := range []string{"● running a_script", "…", "iteration 12/25  [esc] stop"} {
+		if !strings.Contains(status, want) {
+			t.Errorf("status %q is missing %q", status, want)
+		}
+	}
+}
+
 // Streamed text lives below the committed transcript until something commits
 // it. Across a tool call that means narration sinking under the tool traffic it
 // introduced, and staying pinned to the bottom of the view for the rest of the

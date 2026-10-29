@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -368,6 +369,37 @@ func TestAssistantMessageIsAnnouncedBeforeItsToolCalls(t *testing.T) {
 	}
 
 	want := []string{"message", "tool", "message", "done"}
+	if !slices.Equal(order, want) {
+		t.Errorf("event order = %v, want %v", order, want)
+	}
+}
+
+// The operator watches a long tool chain against max_tool_iterations, so every
+// request to the model is announced with its place in that allowance, before
+// anything it streams.
+func TestEachModelRequestIsAnnouncedWithItsNumber(t *testing.T) {
+	provider := &stubProvider{responses: []*llm.ChatResponse{
+		{
+			ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "shell_exec", Arguments: `{"command":"ls"}`}},
+			Usage:     llm.TokenUsage{InputTokens: 10, OutputTokens: 5},
+		},
+		textResponse("here is the listing"),
+	}}
+	agent := newTestAgent(t, []string{"shell"}, provider, &stubRunner{})
+
+	var order []string
+	for _, ev := range runTurn(t, agent, "list the workspace") {
+		switch event := ev.(type) {
+		case IterationStartMsg:
+			order = append(order, fmt.Sprintf("iteration %d/%d", event.Iteration, event.MaxIterations))
+		case AssistantMessageMsg:
+			order = append(order, "message")
+		case ToolCallStartMsg:
+			order = append(order, "tool")
+		}
+	}
+
+	want := []string{"iteration 1/5", "message", "tool", "iteration 2/5", "message"}
 	if !slices.Equal(order, want) {
 		t.Errorf("event order = %v, want %v", order, want)
 	}

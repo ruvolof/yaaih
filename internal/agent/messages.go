@@ -13,6 +13,13 @@ type AssistantDeltaMsg struct {
 	Text string
 }
 
+// IterationStartMsg fires as a turn asks the model for its Iteration-th
+// response, numbered from 1, of at most MaxIterations.
+type IterationStartMsg struct {
+	Iteration     int
+	MaxIterations int
+}
+
 // AssistantMessageMsg fires when the model has finished one assistant message.
 // A turn is a sequence of these: every message but the last carries tool calls
 // and is followed by the loop running them. It marks the point where the text
