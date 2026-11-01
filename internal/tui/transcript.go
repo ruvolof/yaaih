@@ -218,7 +218,7 @@ func (t *transcript) layOut(entry *chatEntry, width int) {
 	case entry.reply != "":
 		entry.layout, entry.layoutInfo = entry.replyLayout(width)
 	default:
-		entry.layout, entry.layoutInfo = wrapText(entry.text, width)
+		entry.layout, entry.layoutInfo = wrapText(revealHiddenStyled(entry.text), width)
 	}
 }
 
@@ -319,6 +319,7 @@ func (t *transcript) plainText() string {
 		}
 		if entry.tool != nil {
 			text, _ = entry.tool.layOut(unwrappedWidth, true, false)
+			text = withoutClusterBreaks(text)
 		}
 		plain.WriteString(stripANSI(text))
 	}
@@ -385,15 +386,16 @@ func (call *toolCall) layOut(width int, expanded, selected bool) (string, []line
 	if expanded {
 		marker = "▾"
 	}
-	heading := styleTool.Render(marker + " " + call.name)
+	name := revealHiddenPlain(call.name)
+	heading := styleTool.Render(marker + " " + name)
 	if selected {
-		heading = styleSelected.Render(marker + " " + call.name)
+		heading = styleSelected.Render(marker + " " + name)
 	}
 
 	if !expanded {
-		lines := []string{heading + styleTool.Render(" "+truncate(call.args, 200))}
+		lines := []string{heading + styleTool.Render(" "+revealHiddenPlain(truncate(call.args, 200)))}
 		if call.answered {
-			lines = append(lines, call.statusLine(" "+truncate(call.replyWithoutErrorPrefix(), 600)))
+			lines = append(lines, call.statusLine(" "+revealHiddenPlain(truncate(call.replyWithoutErrorPrefix(), 600))))
 		}
 		return wrapText(strings.Join(lines, "\n"), width)
 	}

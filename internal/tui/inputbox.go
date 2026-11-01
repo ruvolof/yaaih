@@ -29,6 +29,8 @@ type inputBox struct {
 	// overflowed is whether the content was taller than maxInputRows at the
 	// last fit, which leaves the textarea scrolled away from its first row.
 	overflowed bool
+	// width is the box's width, prompt included.
+	width int
 }
 
 func newInputBox(width int) inputBox {
@@ -62,7 +64,18 @@ func newInputArea() textarea.Model {
 
 func (box *inputBox) Value() string { return box.area.Value() }
 func (box *inputBox) Height() int   { return box.area.Height() }
-func (box *inputBox) View() string  { return box.area.View() }
+
+// View is the textarea as drawn, fitted for the screen. The textarea pads each
+// row out to the width by its own count of the cells the text takes, which is
+// short wherever terminals disagree with it, so a row is cut back to the width
+// once fitted: normally that only takes off the padding.
+func (box *inputBox) View() string {
+	rows := strings.Split(box.area.View(), "\n")
+	for index, row := range rows {
+		rows[index] = ansi.Truncate(revealHiddenStyled(row), box.width, "")
+	}
+	return strings.Join(rows, "\n")
+}
 
 // Update passes msg to the textarea and reports whether the box changed height.
 func (box *inputBox) Update(msg tea.Msg) (cmd tea.Cmd, resized bool) {
@@ -80,6 +93,7 @@ func (box *inputBox) SetValue(text string) (resized bool) {
 // SetWidth sets the width, prompt included, and reports whether rewrapping the
 // content at it changed the box's height.
 func (box *inputBox) SetWidth(width int) (resized bool) {
+	box.width = width
 	box.area.SetWidth(width)
 	box.measure.SetWidth(width)
 	return box.fit()
@@ -137,7 +151,7 @@ func (box *inputBox) rows() ([]string, []lineInfo) {
 		}
 		pieces := make([]string, count)
 		for index := range pieces {
-			pieces[index] = ansi.Cut(rows[row+index], inputPromptWidth, ansi.StringWidth(rows[row+index]))
+			pieces[index] = withoutClusterBreaks(ansi.Cut(rows[row+index], inputPromptWidth, ansi.StringWidth(rows[row+index])))
 		}
 		for index, breakInfo := range breaksIn(line, pieces) {
 			info[row+index].continues, info[row+index].joiner = breakInfo.continues, breakInfo.joiner

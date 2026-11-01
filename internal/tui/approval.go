@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -60,35 +59,6 @@ func argumentText(raw json.RawMessage) string {
 		return string(raw)
 	}
 	return indented.String()
-}
-
-// revealHidden makes characters that would act on the terminal, or render as
-// nothing, show up as escapes. Decoded arguments are model output: a carriage
-// return, an ANSI sequence or a bidi override in a command could otherwise
-// redraw the panel and make the operator approve something other than what
-// they read.
-func revealHidden(text string) string {
-	var revealed strings.Builder
-	for _, character := range text {
-		switch {
-		case character == '\n':
-			revealed.WriteRune(character)
-		case character == '\t':
-			revealed.WriteString("    ")
-		case unicode.IsControl(character), unicode.In(character, unicode.Cf, unicode.Zl, unicode.Zp):
-			revealed.WriteString(styleWarn.Render(escapeRune(character)))
-		default:
-			revealed.WriteRune(character)
-		}
-	}
-	return revealed.String()
-}
-
-func escapeRune(character rune) string {
-	if character < 0x80 {
-		return fmt.Sprintf(`\x%02x`, character)
-	}
-	return fmt.Sprintf(`\u%04x`, character)
 }
 
 // approvalBodyLines lays the fields out at the given width. Every line of a

@@ -166,7 +166,7 @@ func selectedText(lines []string, info []lineInfo, firstLine int, start, end sel
 		if number == end.line {
 			right = min(right, end.column)
 		}
-		current.WriteString(ansi.Cut(plain, left, right))
+		current.WriteString(withoutClusterBreaks(ansi.Cut(plain, left, right)))
 	}
 	logicalLines = append(logicalLines, strings.TrimRight(current.String(), " "))
 	return strings.Join(logicalLines, "\n")
@@ -451,5 +451,5 @@ func (m *Model) pendingLayout(width int) string {
 }
 
 func (m *Model) pendingStyled() string {
-	return styleAssist.Render(m.pendingAs.String())
+	return styleAssist.Render(revealHiddenPlain(m.pendingAs.String()))
 }

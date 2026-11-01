@@ -799,7 +799,7 @@ func (m *Model) sidebarWindow(width, height int) string {
 	last := min(first+height, len(lines))
 	visible := make([]string, 0, last-first)
 	for _, line := range lines[first:last] {
-		visible = append(visible, ansi.Truncate(line, width, "…"))
+		visible = append(visible, ansi.Truncate(revealHiddenStyled(line), width, "…"))
 	}
 	if first > 0 {
 		visible[0] = styleMuted.Render(fmt.Sprintf("▲ %d more", first+1))
@@ -872,7 +872,7 @@ func (m *Model) renderStatus(width int) string {
 	}
 	activity := "streaming response"
 	if m.runningTool != "" {
-		activity = "running " + m.runningTool
+		activity = "running " + revealHiddenPlain(m.runningTool)
 		if job := m.runningJob(); job > 0 {
 			activity += fmt.Sprintf(" (job %d)", job)
 		}

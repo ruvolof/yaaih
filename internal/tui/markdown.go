@@ -22,6 +22,7 @@ type markdownRenderer struct {
 // lines it drew. A reply glamour cannot render is shown as the plain text it
 // was streamed as.
 func (md *markdownRenderer) render(source string, width int) (string, []lineInfo) {
+	source = revealHiddenPlain(source)
 	if md.renderer == nil || md.width != width {
 		renderer, err := glamour.NewTermRenderer(
 			glamour.WithStyles(replyStyle()),
@@ -30,7 +31,7 @@ func (md *markdownRenderer) render(source string, width int) (string, []lineInfo
 		)
 		if err != nil {
 			log.Warn("markdown renderer unavailable", "err", err)
-			return plainReply(source, width)
+			return fittedReply(source, width)
 		}
 		md.renderer = renderer
 		md.width = width
@@ -38,7 +39,7 @@ func (md *markdownRenderer) render(source string, width int) (string, []lineInfo
 	rendered, err := md.renderer.Render(source)
 	if err != nil {
 		log.Warn("markdown render failed", "err", err)
-		return plainReply(source, width)
+		return fittedReply(source, width)
 	}
 	// Glamour wraps only between words, so a token longer than the width — a
 	// path, a URL, a line of code — would overrun the viewport. Glamour's own
@@ -50,7 +51,12 @@ func (md *markdownRenderer) render(source string, width int) (string, []lineInfo
 }
 
 func plainReply(source string, width int) (string, []lineInfo) {
-	return wrapText(styleAssist.Render(source), width)
+	return fittedReply(revealHiddenPlain(source), width)
+}
+
+// fittedReply lays out as plain text a reply already fitted for the screen.
+func fittedReply(fitted string, width int) (string, []lineInfo) {
+	return wrapText(styleAssist.Render(fitted), width)
 }
 
 // wrapText word-wraps text at width, keeping track of the breaks it makes.
